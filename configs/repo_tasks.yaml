@@ -1,0 +1,113 @@
+# Repository-Based Evaluation Tasks Configuration
+# Used for agent realism testing with compile/test/lint tasks
+
+# Task definitions for repo-based evaluation
+tasks:
+  # Bug fixing tasks
+  bug_fix:
+    enabled: true
+    description: "Fix a bug based on issue description and failing test"
+    evaluation:
+      - tests_pass
+      - lint_pass
+      - builds
+
+  # Feature implementation
+  feature_add:
+    enabled: true
+    description: "Add a new feature based on specification"
+    evaluation:
+      - tests_pass
+      - lint_pass
+      - builds
+      - new_tests_added
+
+  # Refactoring
+  refactor:
+    enabled: true
+    description: "Refactor code while maintaining behavior"
+    evaluation:
+      - tests_pass
+      - lint_pass
+      - builds
+      - no_behavior_change
+
+  # Documentation
+  docs:
+    enabled: false
+    description: "Add or improve documentation"
+    evaluation:
+      - builds
+      - docs_valid
+
+# Repository requirements
+repos:
+  # Required files
+  required_files:
+    - package.json
+
+  # Optional (but scored) files
+  optional_files:
+    - tsconfig.json
+    - .eslintrc.json
+    - jest.config.js
+    - vitest.config.ts
+
+  # Required npm scripts
+  required_scripts:
+    - test
+    - build
+
+  # Optional scripts
+  optional_scripts:
+    - lint
+    - typecheck
+
+# Execution environment
+environment:
+  # Node.js version
+  node_version: 24
+
+  # npm/pnpm/yarn
+  package_manager: auto
+
+  # Timeout for commands (seconds)
+  timeouts:
+    install: 300
+    build: 120
+    test: 300
+    lint: 60
+
+# Scoring
+scoring:
+  # Weight per evaluation criterion
+  weights:
+    tests_pass: 40
+    lint_pass: 20
+    builds: 30
+    new_tests_added: 10
+
+  # Partial credit
+  partial_credit:
+    enabled: true
+    test_pass_ratio: true
+
+# Output
+output:
+  dir: "./outputs/repo_eval"
+  save_patches: true
+  save_logs: true
+
+# Safety
+safety:
+  # Maximum file changes per task
+  max_files_changed: 20
+
+  # Maximum lines changed
+  max_lines_changed: 500
+
+  # Disallowed operations
+  disallowed:
+    - delete_tests
+    - modify_config_files
+    - add_dependencies_without_approval

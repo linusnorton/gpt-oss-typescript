@@ -1,0 +1,73 @@
+# NeMo Evaluator Configuration
+# Used by: scripts/run_nemo_eval.sh
+
+# Model configuration
+model:
+  name: "nemotron"
+  base_url: "http://localhost:8000/v1"
+  api_key: "EMPTY"
+
+# Evaluation tasks
+tasks:
+  # Python code generation benchmarks
+  - name: "humaneval"
+    enabled: true
+    num_samples: 1
+    temperature: 0.0
+
+  - name: "mbpp"
+    enabled: true
+    num_samples: 1
+    temperature: 0.0
+
+  # TypeScript benchmarks (if available)
+  - name: "humaneval-ts"
+    enabled: false  # Enable when dataset is available
+    num_samples: 1
+    temperature: 0.0
+
+  - name: "multiple-ts"
+    enabled: false
+    num_samples: 1
+    temperature: 0.0
+
+# Generation parameters
+generation:
+  max_tokens: 512
+  temperature: 0.0
+  top_p: 1.0
+  stop_sequences:
+    - "\nclass "
+    - "\ndef "
+    - "\n#"
+    - "\nif __name__"
+    - "\nprint("
+
+# Evaluation settings
+evaluation:
+  # Number of parallel requests
+  batch_size: 1
+
+  # Timeout per request (seconds)
+  timeout: 120
+
+  # Retry failed requests
+  max_retries: 3
+
+# Output configuration
+output:
+  dir: "./outputs/eval"
+  save_generations: true
+  save_raw_results: true
+
+# Pass@k computation
+pass_at_k:
+  - 1
+  - 10
+  - 100
+
+# Code execution (for pass@k)
+execution:
+  enabled: false  # Enable for accurate pass@k
+  timeout: 10     # Per-test timeout
+  sandbox: true   # Use sandboxed execution

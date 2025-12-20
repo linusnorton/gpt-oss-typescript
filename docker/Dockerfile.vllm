@@ -1,0 +1,109 @@
+# Dockerfile.vllm - vLLM serving image for inference
+#
+# CUDA Version Configuration:
+# - Default: 12.4.1 (recommended for vLLM 0.6+)
+# - vLLM requires specific CUDA versions - check compatibility
+# - Override: docker build --build-arg CUDA_VERSION=12.1.1 ...
+#
+# Note: For production, consider using official vLLM images:
+# docker pull vllm/vllm-openai:latest
+
+ARG CUDA_VERSION=12.4.1
+ARG CUDNN_VERSION=9
+ARG UBUNTU_VERSION=22.04
+
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn${CUDNN_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS builder
+
+# Prevent interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+ARG PYTHON_VERSION=3.11
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    git \
+    wget \
+    ca-certificates \
+    software-properties-common \
+    ninja-build \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+    python${PYTHON_VERSION} \
+    python${PYTHON_VERSION}-dev \
+    python${PYTHON_VERSION}-venv \
+    python${PYTHON_VERSION}-distutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1
+
+# Install pip
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION}
+
+# Install vLLM (this takes a while due to compilation)
+RUN pip install vllm ray
+
+# Runtime image
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn${CUDNN_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+ARG PYTHON_VERSION=3.11
+
+# Labels
+LABEL maintainer="Your Name <your.email@example.com>"
+LABEL description="Nemotron TypeScript Post-Training - vLLM Serving Image"
+LABEL cuda.version="${CUDA_VERSION}"
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+    python${PYTHON_VERSION} \
+    python${PYTHON_VERSION}-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1
+
+# Copy Python packages from builder
+COPY --from=builder /usr/local/lib/python${PYTHON_VERSION}/dist-packages /usr/local/lib/python${PYTHON_VERSION}/dist-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Set working directory
+WORKDIR /app
+
+# Create directories
+RUN mkdir -p /app/models /app/outputs/logs
+
+# Environment variables
+ENV PYTHONUNBUFFERED=1
+ENV HF_HOME=/app/.cache/huggingface
+
+# Expose port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Default: serve Nemotron
+# Override with: docker run ... --model <your-model>
+ENTRYPOINT ["python", "-m", "vllm.entrypoints.openai.api_server"]
+CMD ["--model", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--dtype", "bfloat16", \
+     "--trust-remote-code", \
+     "--enable-prefix-caching"]

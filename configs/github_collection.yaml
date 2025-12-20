@@ -1,0 +1,83 @@
+# GitHub Repository Collection Configuration
+# Used by: scripts/collect_github_repos.py
+
+# Target languages to collect
+languages:
+  - TypeScript
+  - JavaScript
+
+# Minimum stars for quality filtering
+min_stars: 100
+
+# Maximum repositories to collect
+max_repos: 1000
+
+# Allowed licenses (SPDX identifiers)
+# Only permissively licensed code for training
+licenses:
+  - mit
+  - apache-2.0
+  - bsd-2-clause
+  - bsd-3-clause
+  - isc
+  - unlicense
+  - cc0-1.0
+  - 0bsd
+
+# Repository filters
+filters:
+  # Skip archived repositories
+  skip_archived: true
+
+  # Skip forks (prefer originals)
+  skip_forks: true
+
+  # Maximum repository size in MB
+  max_size_mb: 100
+
+  # Minimum recent activity (days since last push)
+  max_days_since_push: 365
+
+  # Required files (at least one must exist)
+  required_files:
+    - package.json
+    - tsconfig.json
+
+# Search queries
+# Will be combined with language filter
+queries:
+  # High-quality TypeScript projects
+  - "stars:>=500 language:TypeScript"
+  - "stars:>=200 topic:typescript"
+
+  # Node.js and frameworks
+  - "stars:>=300 topic:nodejs language:TypeScript"
+  - "stars:>=200 topic:react language:TypeScript"
+  - "stars:>=200 topic:nextjs"
+  - "stars:>=200 topic:nestjs"
+
+  # CLI tools and utilities
+  - "stars:>=100 topic:cli language:TypeScript"
+
+  # Testing and tooling
+  - "stars:>=100 topic:testing language:TypeScript"
+
+# Rate limiting
+rate_limit:
+  # Delay between API calls (seconds)
+  delay_seconds: 1
+
+  # Maximum requests per hour
+  max_requests_per_hour: 1000
+
+# Output settings
+output:
+  # Directory structure
+  # repos/{owner}_{repo}/
+  flatten_structure: true
+
+  # Clone depth (1 for shallow clone)
+  clone_depth: 1
+
+  # Save metadata JSON
+  save_metadata: true

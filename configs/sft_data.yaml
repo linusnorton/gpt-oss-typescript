@@ -1,0 +1,71 @@
+# Supervised Fine-Tuning Data Configuration
+# Used by: scripts/apply_agentic_sft_dataset.py
+
+# Datasets to include
+datasets:
+  # NVIDIA Nemotron Agentic dataset
+  - id: "nvidia/Nemotron-Agentic-v1"
+    enabled: true
+    weight: 1.0
+
+  # Additional datasets can be added here
+  # - id: "some/other-dataset"
+  #   enabled: false
+  #   weight: 0.5
+
+# Output configuration
+output:
+  dir: "./data/sft"
+  train_file: "train.jsonl"
+  val_file: "val.jsonl"
+  train_split: 0.95
+
+# Filtering
+filter:
+  # Only include TypeScript/JavaScript related examples
+  typescript_only: false
+
+  # Include tool/function call examples
+  include_tool_calls: true
+
+  # Maximum conversation turns
+  max_turns: 10
+
+  # Minimum example length (characters)
+  min_length: 100
+
+  # Maximum example length (characters)
+  max_length: 32768
+
+# Formatting
+format:
+  # Output format: chatml, alpaca, sharegpt, nemotron
+  type: "chatml"
+
+  # System prompt for examples without one
+  default_system: "You are a helpful TypeScript/JavaScript programming assistant."
+
+  # Add language tags to code blocks
+  add_language_tags: true
+
+# Quality filters
+quality:
+  # Remove examples with low-quality responses
+  min_response_length: 50
+
+  # Remove examples with repetitive content
+  max_repetition_ratio: 0.5
+
+  # Language detection (if enabled)
+  require_english: true
+
+# Sampling
+sampling:
+  # Maximum total samples
+  max_samples: null
+
+  # Random seed for reproducibility
+  seed: 42
+
+  # Shuffle before splitting
+  shuffle: true

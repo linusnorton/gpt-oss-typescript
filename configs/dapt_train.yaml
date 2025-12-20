@@ -1,0 +1,93 @@
+# Domain-Adaptive Pre-Training Configuration
+# Used by: scripts/run_dapt_train.py
+
+# Base model
+model_id: "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16"
+trust_remote_code: true
+
+# Training data
+train_data: "./data/corpus/train_corpus.jsonl"
+output_dir: "./outputs/checkpoints/dapt"
+
+# LoRA Configuration (QLoRA)
+lora:
+  r: 64                    # LoRA rank
+  alpha: 16                # LoRA alpha (scaling)
+  dropout: 0.05            # LoRA dropout
+  target_modules:          # Modules to apply LoRA to
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+# Quantization (4-bit)
+quantization:
+  use_4bit: true
+  bnb_4bit_compute_dtype: "bfloat16"
+  bnb_4bit_quant_type: "nf4"
+  use_double_quant: true
+
+# Training hyperparameters
+training:
+  batch_size: 1                      # Per-device batch size
+  gradient_accumulation_steps: 8     # Effective batch = 8
+  learning_rate: 2.0e-5              # Learning rate
+  num_epochs: 3                      # Training epochs
+  max_steps: -1                      # -1 to use epochs instead
+  warmup_ratio: 0.03                 # Warmup ratio
+  weight_decay: 0.01                 # Weight decay
+  max_grad_norm: 1.0                 # Gradient clipping
+
+# Sequence configuration
+sequence:
+  max_length: 4096                   # Maximum sequence length
+  packing: false                     # Pack multiple docs per sequence
+
+# Checkpointing
+checkpointing:
+  save_steps: 500
+  save_total_limit: 3
+  logging_steps: 10
+  eval_steps: 500
+
+# Hardware optimization
+hardware:
+  gradient_checkpointing: true       # Trade compute for memory
+  bf16: true                         # Use bfloat16
+  tf32: true                         # Use TF32 for matmuls
+  dataloader_num_workers: 4
+
+# Optimizer
+optimizer: "paged_adamw_32bit"
+
+# Logging
+logging:
+  report_to: "none"                  # none, wandb, tensorboard
+  run_name: "dapt-nemotron-ts"
+
+# Corpus building settings
+corpus:
+  # File extensions to include
+  extensions:
+    - .ts
+    - .tsx
+    - .js
+    - .jsx
+    - .mjs
+    - .cjs
+    - .json
+    - .md
+
+  # Maximum file size (bytes)
+  max_file_size: 1048576  # 1MB
+
+  # Chunking
+  chunk_size: 4096        # Tokens per chunk
+  chunk_overlap: 256      # Overlap between chunks
+
+  # Deduplication
+  dedupe_threshold: 0.8   # Jaccard similarity threshold
+  dedupe_num_perm: 128    # MinHash permutations

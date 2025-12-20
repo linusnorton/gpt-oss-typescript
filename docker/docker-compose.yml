@@ -1,0 +1,130 @@
+# Docker Compose for Nemotron TypeScript Post-Training
+#
+# Usage:
+#   docker compose -f docker/docker-compose.yml up -d vllm
+#   docker compose -f docker/docker-compose.yml run eval
+#   docker compose -f docker/docker-compose.yml run train
+#
+# Prerequisites:
+#   - NVIDIA Container Toolkit installed
+#   - .env file with HF_TOKEN set
+
+name: nemotron-ts
+
+services:
+  # vLLM Inference Server
+  vllm:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.vllm
+      args:
+        CUDA_VERSION: ${CUDA_VERSION:-12.4.1}
+    image: nemotron-ts-vllm:latest
+    container_name: nemotron-vllm
+    ports:
+      - "${VLLM_PORT:-8000}:8000"
+    volumes:
+      - ../outputs:/app/outputs
+      - hf-cache:/app/.cache/huggingface
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${GPU_COUNT:-1}
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+
+  # Evaluation Service
+  eval:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.eval
+      args:
+        CUDA_VERSION: ${CUDA_VERSION:-12.4.1}
+    image: nemotron-ts-eval:latest
+    container_name: nemotron-eval
+    volumes:
+      - ../data:/app/data
+      - ../outputs:/app/outputs
+      - ../configs:/app/configs
+      - hf-cache:/app/.cache/huggingface
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - VLLM_BASE_URL=http://vllm:8000/v1
+    depends_on:
+      vllm:
+        condition: service_healthy
+    network_mode: "host"
+    command: ["python", "-m", "src.eval.nemo_eval_runner",
+              "--base-url", "http://localhost:${VLLM_PORT:-8000}/v1",
+              "--tasks", "humaneval,mbpp"]
+
+  # Training Service
+  train:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.train
+      args:
+        CUDA_VERSION: ${CUDA_VERSION:-12.4.1}
+    image: nemotron-ts-train:latest
+    container_name: nemotron-train
+    volumes:
+      - ../data:/app/data
+      - ../outputs:/app/outputs
+      - ../configs:/app/configs
+      - hf-cache:/app/.cache/huggingface
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # Override to run training
+    command: ["python", "scripts/run_dapt_train.py", "--config", "configs/dapt_train.yaml"]
+    profiles:
+      - training
+
+  # Data collection (runs on CPU)
+  collect:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.eval
+      args:
+        CUDA_VERSION: ${CUDA_VERSION:-12.4.1}
+    image: nemotron-ts-eval:latest
+    container_name: nemotron-collect
+    volumes:
+      - ../data:/app/data
+      - ../outputs:/app/outputs
+      - ../configs:/app/configs
+    environment:
+      - GITHUB_PAT=${GITHUB_PAT}
+      - HF_TOKEN=${HF_TOKEN}
+    command: ["python", "scripts/collect_github_repos.py",
+              "--config", "configs/github_collection.yaml",
+              "--output", "/app/data/repos"]
+    profiles:
+      - data
+
+volumes:
+  hf-cache:
+    name: nemotron-hf-cache
+
+networks:
+  default:
+    name: nemotron-network

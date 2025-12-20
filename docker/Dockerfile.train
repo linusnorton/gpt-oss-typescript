@@ -1,0 +1,80 @@
+# Dockerfile.train - Training image for DAPT/SFT with QLoRA
+#
+# CUDA Version Configuration:
+# - Default: 12.4.1 (compatible with PyTorch 2.4+, vLLM 0.6+)
+# - Override: docker build --build-arg CUDA_VERSION=12.1.1 ...
+#
+# See README.md for CUDA compatibility matrix
+
+ARG CUDA_VERSION=12.4.1
+ARG CUDNN_VERSION=9
+ARG UBUNTU_VERSION=22.04
+
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn${CUDNN_VERSION}-devel-ubuntu${UBUNTU_VERSION}
+
+# Prevent interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Python version
+ARG PYTHON_VERSION=3.11
+
+# Labels
+LABEL maintainer="Your Name <your.email@example.com>"
+LABEL description="Nemotron TypeScript Post-Training - Training Image"
+LABEL cuda.version="${CUDA_VERSION}"
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    git \
+    git-lfs \
+    wget \
+    ca-certificates \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+    python${PYTHON_VERSION} \
+    python${PYTHON_VERSION}-dev \
+    python${PYTHON_VERSION}-venv \
+    python${PYTHON_VERSION}-distutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python aliases
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1
+
+# Install pip
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION}
+
+# Install uv for fast package management
+RUN pip install uv
+
+# Set working directory
+WORKDIR /app
+
+# Copy project files
+COPY pyproject.toml .
+COPY src/ src/
+COPY scripts/ scripts/
+COPY configs/ configs/
+
+# Install dependencies
+RUN uv pip install --system -e ".[dev]"
+
+# Install flash-attention (optional, improves performance)
+RUN pip install flash-attn --no-build-isolation || echo "flash-attn not available for this CUDA version"
+
+# Create directories
+RUN mkdir -p /app/data /app/outputs/logs /app/outputs/checkpoints
+
+# Environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV HF_HOME=/app/.cache/huggingface
+ENV TRANSFORMERS_CACHE=/app/.cache/huggingface
+
+# Default command
+CMD ["python", "-m", "src.train.dapt.train_hf_peft", "--help"]
