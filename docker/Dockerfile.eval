@@ -20,7 +20,7 @@ ARG NODE_VERSION=24
 
 # Labels
 LABEL maintainer="Your Name <your.email@example.com>"
-LABEL description="Nemotron TypeScript Post-Training - Evaluation Image"
+LABEL description="GPT-OSS TypeScript Post-Training - Evaluation Image"
 LABEL cuda.version="${CUDA_VERSION}"
 
 # Install system dependencies

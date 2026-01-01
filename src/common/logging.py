@@ -56,7 +56,7 @@ def setup_logging(
         )
         logging.getLogger().addHandler(file_handler)
 
-    _logger = logging.getLogger("nemotron-ts")
+    _logger = logging.getLogger("gptoss-ts")
     _logger.setLevel(level)
 
 

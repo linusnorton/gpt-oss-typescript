@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # serve_vllm.sh - Start vLLM OpenAI-compatible server
-# Supports base HF models and LoRA adapters
+# Optimized for GPT-OSS-20B and fine-tuned models with LoRA adapters
 
 set -euo pipefail
 
@@ -22,12 +22,13 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Default configuration
-DEFAULT_MODEL="${MODEL_ID:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16}"
+DEFAULT_MODEL="${MODEL_ID:-unsloth/gpt-oss-20b}"
 DEFAULT_PORT="${VLLM_PORT:-8000}"
 DEFAULT_HOST="${VLLM_HOST:-0.0.0.0}"
 DEFAULT_GPU_MEMORY_UTIL="${VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
-DEFAULT_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-8192}"
-DEFAULT_DTYPE="bfloat16"
+DEFAULT_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-16384}"
+DEFAULT_DTYPE="auto"
+DEFAULT_SERVED_NAME="${VLLM_SERVED_NAME:-gpt-oss}"
 
 # Parse arguments
 MODEL=""
@@ -41,12 +42,17 @@ TENSOR_PARALLEL_SIZE=""
 TRUST_REMOTE_CODE=true
 QUANTIZATION=""
 ENABLE_PREFIX_CACHING=true
+SERVED_NAME="$DEFAULT_SERVED_NAME"
+# GPT-OSS uses the Harmony format, which requires the 'openai' tool parser (vLLM >= 0.10.2)
+ENABLE_TOOL_CHOICE="${VLLM_ENABLE_TOOL_CHOICE:-true}"
+TOOL_CALL_PARSER="${VLLM_TOOL_CALL_PARSER:-openai}"
+REASONING_PARSER="${VLLM_REASONING_PARSER:-}"
 DRY_RUN=false
 
 print_usage() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
-    echo "Start a vLLM OpenAI-compatible server for Nemotron or fine-tuned models."
+    echo "Start a vLLM OpenAI-compatible server for GPT-OSS or fine-tuned models."
     echo ""
     echo "Options:"
     echo "  --model PATH          Model ID or local path (default: $DEFAULT_MODEL)"
@@ -56,21 +62,28 @@ print_usage() {
     echo "  --max-model-len N     Maximum sequence length (default: $DEFAULT_MAX_MODEL_LEN)"
     echo "  --port PORT           Server port (default: $DEFAULT_PORT)"
     echo "  --host HOST           Server host (default: $DEFAULT_HOST)"
+    echo "  --served-name NAME    Model name in API (default: $DEFAULT_SERVED_NAME)"
     echo "  --tensor-parallel N   Number of GPUs for tensor parallelism"
     echo "  --quantization TYPE   Quantization: awq, gptq, squeezellm, fp8 (optional)"
+    echo "  --tool-call-parser P  Tool call parser: openai (for gpt-oss), hermes, llama3_json, etc."
+    echo "  --reasoning-parser P  Reasoning parser: deepseek_r1 (optional)"
+    echo "  --no-tool-choice      Disable auto tool choice"
     echo "  --no-prefix-caching   Disable prefix caching"
     echo "  --dry-run             Print command without executing"
     echo "  -h, --help            Show this help message"
     echo ""
     echo "Examples:"
-    echo "  # Serve base model"
-    echo "  $0 --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16"
+    echo "  # Serve GPT-OSS base model"
+    echo "  $0 --model unsloth/gpt-oss-20b"
+    echo ""
+    echo "  # Serve merged fine-tuned model"
+    echo "  $0 --model ./outputs/checkpoints/dapt/merged"
     echo ""
     echo "  # Serve with LoRA adapter"
-    echo "  $0 --model ./outputs/checkpoints/base --lora ./outputs/checkpoints/lora"
+    echo "  $0 --model unsloth/gpt-oss-20b --lora ./outputs/checkpoints/lora"
     echo ""
     echo "  # Serve with reduced memory"
-    echo "  $0 --gpu-memory-util 0.8 --max-model-len 4096"
+    echo "  $0 --gpu-memory-util 0.8 --max-model-len 2048"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -111,6 +124,22 @@ while [[ $# -gt 0 ]]; do
             QUANTIZATION="$2"
             shift 2
             ;;
+        --served-name)
+            SERVED_NAME="$2"
+            shift 2
+            ;;
+        --tool-call-parser)
+            TOOL_CALL_PARSER="$2"
+            shift 2
+            ;;
+        --reasoning-parser)
+            REASONING_PARSER="$2"
+            shift 2
+            ;;
+        --no-tool-choice)
+            ENABLE_TOOL_CHOICE=false
+            shift
+            ;;
         --no-prefix-caching)
             ENABLE_PREFIX_CACHING=false
             shift
@@ -135,7 +164,7 @@ done
 MODEL="${MODEL:-$DEFAULT_MODEL}"
 
 echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}  vLLM Server for Nemotron${NC}"
+echo -e "${BLUE}  vLLM Server for GPT-OSS${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo ""
 
@@ -168,43 +197,29 @@ echo -e "${GREEN}  Found $GPU_COUNT GPU(s)${NC}"
 # Auto-detect tensor parallel size if not specified
 if [ -z "$TENSOR_PARALLEL_SIZE" ]; then
     TENSOR_PARALLEL_SIZE=1
-    # For Nemotron 30B-A3B, recommend single GPU for 80GB+ or 2 GPUs otherwise
+    # GPT-OSS-20B fits comfortably on 16GB+ VRAM
     GPU_MEMORY=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -n1)
-    if [ "$GPU_MEMORY" -lt 48000 ] && [ "$GPU_COUNT" -gt 1 ]; then
-        echo -e "${YELLOW}  Note: GPU memory < 48GB, consider using --tensor-parallel 2${NC}"
-    fi
+    echo -e "${GREEN}  GPU memory: ${GPU_MEMORY}MB${NC}"
 fi
 
-# Check model compatibility and warn about potential issues
+# Check model compatibility and provide info
 echo -e "\n${YELLOW}Checking model compatibility...${NC}"
 check_model_support() {
     local model_name="$1"
 
-    # Nemotron 3 Nano 30B-A3B is a Mixture of Experts (MoE) model
-    if [[ "$model_name" == *"Nemotron-3-Nano"* ]] || [[ "$model_name" == *"30B-A3B"* ]]; then
-        echo -e "${GREEN}  Detected: Nemotron 3 Nano 30B-A3B (MoE model)${NC}"
-        echo -e "  Architecture: 30B total params, 3B active params"
-        echo -e "  Context: 128K tokens supported"
+    # GPT-OSS-20B detection
+    if [[ "$model_name" == *"gpt-oss"* ]]; then
+        echo -e "${GREEN}  Detected: GPT-OSS-20B (OpenAI)${NC}"
+        echo -e "  Architecture: 21B total params, 3.6B active (MoE)"
+        echo -e "  Context: 4K tokens (default)"
+        echo -e "  Estimated VRAM: ~16GB"
+        return 0
+    fi
 
-        # Check vLLM version for MoE support
-        VLLM_MAJOR=$(echo "$VLLM_VERSION" | cut -d. -f1)
-        VLLM_MINOR=$(echo "$VLLM_VERSION" | cut -d. -f2)
-        if [ "$VLLM_MAJOR" -eq 0 ] && [ "$VLLM_MINOR" -lt 5 ]; then
-            echo -e "${YELLOW}  Warning: vLLM < 0.5.0 may have limited MoE support${NC}"
-            echo -e "  Consider upgrading: pip install -U vllm"
-        fi
-
-        # Memory estimation
-        local estimated_memory
-        if [[ "$DTYPE" == "bfloat16" ]] || [[ "$DTYPE" == "float16" ]]; then
-            estimated_memory="~60GB"
-        elif [[ "$QUANTIZATION" == "awq" ]] || [[ "$QUANTIZATION" == "gptq" ]]; then
-            estimated_memory="~20-30GB"
-        else
-            estimated_memory="~60GB"
-        fi
-        echo -e "  Estimated VRAM: $estimated_memory"
-
+    # Unsloth model detection
+    if [[ "$model_name" == *"unsloth"* ]]; then
+        echo -e "${GREEN}  Detected: Unsloth model${NC}"
+        echo -e "  Optimized for efficient inference"
         return 0
     fi
 
@@ -233,6 +248,7 @@ else
     fi
 fi
 
+
 # Build vLLM command
 VLLM_CMD="python -m vllm.entrypoints.openai.api_server"
 VLLM_CMD+=" --model $MODEL"
@@ -260,15 +276,25 @@ if [ -n "$LORA_PATH" ]; then
         exit 1
     fi
     VLLM_CMD+=" --enable-lora"
-    VLLM_CMD+=" --lora-modules nemotron-lora=$LORA_PATH"
+    VLLM_CMD+=" --lora-modules gptoss-lora=$LORA_PATH"
 fi
 
 if [ -n "$QUANTIZATION" ]; then
     VLLM_CMD+=" --quantization $QUANTIZATION"
 fi
 
+# Tool calling options (useful for agent workflows)
+if [ "$ENABLE_TOOL_CHOICE" = true ]; then
+    VLLM_CMD+=" --enable-auto-tool-choice"
+    VLLM_CMD+=" --tool-call-parser $TOOL_CALL_PARSER"
+fi
+
+if [ -n "$REASONING_PARSER" ]; then
+    VLLM_CMD+=" --reasoning-parser $REASONING_PARSER"
+fi
+
 # Add served model name for API compatibility
-VLLM_CMD+=" --served-model-name nemotron"
+VLLM_CMD+=" --served-model-name $SERVED_NAME"
 
 echo -e "\n${YELLOW}vLLM Command:${NC}"
 echo "$VLLM_CMD"

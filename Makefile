@@ -7,7 +7,7 @@
 
 # Default target
 help:
-	@echo "Nemotron TypeScript Post-Training Harness"
+	@echo "GPT-OSS TypeScript Post-Training Harness"
 	@echo ""
 	@echo "Setup:"
 	@echo "  make install        Install core dependencies with uv"
@@ -35,7 +35,8 @@ help:
 	@echo ""
 	@echo "Inference & Evaluation:"
 	@echo "  make serve-vllm     Start vLLM server"
-	@echo "  make eval           Run NeMo evaluation"
+	@echo "  make eval           Run HumanEval/MBPP TypeScript evaluation"
+	@echo "  make eval-swe-bench Run SWE-bench TypeScript evaluation"
 	@echo ""
 	@echo "Docker:"
 	@echo "  make docker-build        Build all Docker images"
@@ -46,12 +47,12 @@ help:
 	@echo "  make docker-down         Stop all services"
 
 # Environment variables
-PYTHON ?= python3.11
+PYTHON ?= python3.13
 UV ?= uv
 VENV_DIR ?= .venv
 DATA_DIR ?= ./data
 OUTPUT_DIR ?= ./outputs
-MODEL_ID ?= nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+MODEL_ID ?= unsloth/gpt-oss-20b
 
 # Check if .env exists, if not copy from example
 .env:
@@ -138,6 +139,15 @@ serve-vllm:
 eval:
 	@bash scripts/run_nemo_eval.sh
 
+eval-swe-bench:
+	@echo "Running SWE-bench TypeScript evaluation..."
+	@. .venv/bin/activate && python3 -m src.eval.swe_bench_ts \
+		--model-name $(or $(MODEL_NAME),gpt-oss) \
+		--base-url $(or $(BASE_URL),http://localhost:8000/v1) \
+		--max-workers $(or $(MAX_WORKERS),16) \
+		$(if $(MAX_INSTANCES),--max-instances $(MAX_INSTANCES),) \
+		$(if $(VERBOSE),--verbose,)
+
 # Docker targets
 DOCKER_COMPOSE = docker compose -f docker/docker-compose.yml
 CUDA_VERSION ?= 12.4.1
@@ -148,19 +158,19 @@ docker-build-train:
 	docker build \
 		--build-arg CUDA_VERSION=$(CUDA_VERSION) \
 		-f docker/Dockerfile.train \
-		-t nemotron-ts-train:latest .
+		-t gptoss-ts-train:latest .
 
 docker-build-eval:
 	docker build \
 		--build-arg CUDA_VERSION=$(CUDA_VERSION) \
 		-f docker/Dockerfile.eval \
-		-t nemotron-ts-eval:latest .
+		-t gptoss-ts-eval:latest .
 
 docker-build-vllm:
 	docker build \
 		--build-arg CUDA_VERSION=$(CUDA_VERSION) \
 		-f docker/Dockerfile.vllm \
-		-t nemotron-ts-vllm:latest .
+		-t gptoss-ts-vllm:latest .
 
 docker-up:
 	$(DOCKER_COMPOSE) up -d

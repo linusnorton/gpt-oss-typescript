@@ -58,7 +58,7 @@ ARG PYTHON_VERSION=3.11
 
 # Labels
 LABEL maintainer="Your Name <your.email@example.com>"
-LABEL description="Nemotron TypeScript Post-Training - vLLM Serving Image"
+LABEL description="GPT-OSS TypeScript Post-Training - vLLM Serving Image"
 LABEL cuda.version="${CUDA_VERSION}"
 
 # Install runtime dependencies
@@ -98,10 +98,10 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Default: serve Nemotron
+# Default: serve GPT-OSS
 # Override with: docker run ... --model <your-model>
 ENTRYPOINT ["python", "-m", "vllm.entrypoints.openai.api_server"]
-CMD ["--model", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16", \
+CMD ["--model", "unsloth/gpt-oss-20b", \
      "--host", "0.0.0.0", \
      "--port", "8000", \
      "--dtype", "bfloat16", \

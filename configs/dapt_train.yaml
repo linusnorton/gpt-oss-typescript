@@ -1,19 +1,18 @@
 # Domain-Adaptive Pre-Training Configuration
 # Used by: scripts/run_dapt_train.py
 
-# Base model
-model_id: "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16"
-trust_remote_code: true
+# Base model (Unsloth's gpt-oss-20b for QLoRA)
+model_id: "unsloth/gpt-oss-20b"
 
 # Training data
 train_data: "./data/corpus/train_corpus.jsonl"
 output_dir: "./outputs/checkpoints/dapt"
 
-# LoRA Configuration (QLoRA)
+# LoRA Configuration (QLoRA via Unsloth)
 lora:
   r: 64                    # LoRA rank
   alpha: 16                # LoRA alpha (scaling)
-  dropout: 0.05            # LoRA dropout
+  dropout: 0.0             # Unsloth optimized (0 dropout)
   target_modules:          # Modules to apply LoRA to
     - q_proj
     - k_proj
@@ -23,18 +22,11 @@ lora:
     - up_proj
     - down_proj
 
-# Quantization (4-bit)
-quantization:
-  use_4bit: true
-  bnb_4bit_compute_dtype: "bfloat16"
-  bnb_4bit_quant_type: "nf4"
-  use_double_quant: true
-
-# Training hyperparameters
+# Training hyperparameters (optimized for Unsloth)
 training:
-  batch_size: 1                      # Per-device batch size
-  gradient_accumulation_steps: 8     # Effective batch = 8
-  learning_rate: 2.0e-5              # Learning rate
+  batch_size: 2                      # Per-device batch size (can be larger with Unsloth)
+  gradient_accumulation_steps: 4     # Effective batch = 8
+  learning_rate: 2.0e-4              # Higher LR works with Unsloth
   num_epochs: 3                      # Training epochs
   max_steps: -1                      # -1 to use epochs instead
   warmup_ratio: 0.03                 # Warmup ratio
@@ -43,7 +35,7 @@ training:
 
 # Sequence configuration
 sequence:
-  max_length: 4096                   # Maximum sequence length
+  max_length: 16384                  # Maximum sequence length (reduce if OOM)
   packing: false                     # Pack multiple docs per sequence
 
 # Checkpointing
@@ -55,18 +47,17 @@ checkpointing:
 
 # Hardware optimization
 hardware:
-  gradient_checkpointing: true       # Trade compute for memory
+  gradient_checkpointing: "unsloth"  # Unsloth optimized checkpointing
   bf16: true                         # Use bfloat16
-  tf32: true                         # Use TF32 for matmuls
   dataloader_num_workers: 4
 
-# Optimizer
-optimizer: "paged_adamw_32bit"
+# Optimizer (Unsloth-compatible)
+optimizer: "adamw_8bit"
 
 # Logging
 logging:
   report_to: "none"                  # none, wandb, tensorboard
-  run_name: "dapt-nemotron-ts"
+  run_name: "dapt-gptoss-ts"
 
 # Corpus building settings
 corpus:
@@ -85,8 +76,8 @@ corpus:
   max_file_size: 1048576  # 1MB
 
   # Chunking
-  chunk_size: 4096        # Tokens per chunk
-  chunk_overlap: 256      # Overlap between chunks
+  chunk_size: 16384       # Tokens per chunk (match sequence.max_length)
+  chunk_overlap: 1024     # Overlap between chunks
 
   # Deduplication
   dedupe_threshold: 0.8   # Jaccard similarity threshold

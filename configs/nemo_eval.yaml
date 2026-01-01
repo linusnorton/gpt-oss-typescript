@@ -1,33 +1,22 @@
-# NeMo Evaluator Configuration
+# Evaluator Configuration
 # Used by: scripts/run_nemo_eval.sh
 
 # Model configuration
 model:
-  name: "nemotron"
+  name: "gpt-oss"
   base_url: "http://localhost:8000/v1"
   api_key: "EMPTY"
 
 # Evaluation tasks
 tasks:
-  # Python code generation benchmarks
-  - name: "humaneval"
-    enabled: true
-    num_samples: 1
-    temperature: 0.0
-
-  - name: "mbpp"
-    enabled: true
-    num_samples: 1
-    temperature: 0.0
-
-  # TypeScript benchmarks (if available)
+  # TypeScript code generation benchmarks
   - name: "humaneval-ts"
-    enabled: false  # Enable when dataset is available
+    enabled: true
     num_samples: 1
     temperature: 0.0
 
-  - name: "multiple-ts"
-    enabled: false
+  - name: "mbpp-ts"
+    enabled: true
     num_samples: 1
     temperature: 0.0
 
@@ -37,11 +26,12 @@ generation:
   temperature: 0.0
   top_p: 1.0
   stop_sequences:
+    - "\nfunction "
     - "\nclass "
-    - "\ndef "
-    - "\n#"
-    - "\nif __name__"
-    - "\nprint("
+    - "\ninterface "
+    - "\ntype "
+    - "\nexport "
+    - "\nconsole.log("
 
 # Evaluation settings
 evaluation:

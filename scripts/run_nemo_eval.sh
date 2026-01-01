@@ -7,6 +7,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
+# Activate virtual environment if it exists
+if [ -f "$PROJECT_ROOT/.venv/bin/activate" ]; then
+    source "$PROJECT_ROOT/.venv/bin/activate"
+fi
+
 # Load environment variables
 if [ -f "$PROJECT_ROOT/.env" ]; then
     set -a
@@ -23,8 +28,8 @@ NC='\033[0m' # No Color
 
 # Default configuration
 DEFAULT_BASE_URL="http://localhost:${VLLM_PORT:-8000}/v1"
-DEFAULT_MODEL_NAME="nemotron"
-DEFAULT_TASKS="humaneval,mbpp"
+DEFAULT_MODEL_NAME="gpt-oss"
+DEFAULT_TASKS="humaneval-ts,mbpp-ts"
 DEFAULT_API_KEY="${NEMO_EVAL_API_KEY:-EMPTY}"
 DEFAULT_OUTPUT_DIR="$PROJECT_ROOT/outputs/eval"
 
@@ -51,7 +56,7 @@ print_usage() {
     echo "  --base-url URL        OpenAI-compatible API base URL (default: $DEFAULT_BASE_URL)"
     echo "  --api-key KEY         API key for authentication (default: EMPTY)"
     echo "  --tasks TASKS         Comma-separated task list (default: $DEFAULT_TASKS)"
-    echo "                        Available: humaneval, mbpp, humaneval-ts, multiple-ts"
+    echo "                        Available: humaneval-ts, mbpp-ts"
     echo "  --out DIR             Output directory (default: $DEFAULT_OUTPUT_DIR)"
     echo "  --config FILE         Config file override (default: configs/nemo_eval.yaml)"
     echo "  --num-samples N       Number of samples per task"
@@ -62,18 +67,15 @@ print_usage() {
     echo "  -h, --help            Show this help message"
     echo ""
     echo "Available Tasks:"
-    echo "  humaneval             HumanEval Python benchmark"
-    echo "  mbpp                  MBPP Python benchmark"
-    echo "  humaneval-ts          HumanEval TypeScript (if available)"
-    echo "  multiple-ts           MultiPL-E TypeScript benchmark"
-    echo "  bigcode-*             BigCode harness tasks"
+    echo "  humaneval-ts          HumanEval TypeScript (HumanEval-X)"
+    echo "  mbpp-ts               MBPP TypeScript (MultiPL-E)"
     echo ""
     echo "Examples:"
     echo "  # Basic evaluation"
-    echo "  $0 --tasks humaneval,mbpp"
+    echo "  $0 --tasks humaneval-ts"
     echo ""
-    echo "  # TypeScript focused"
-    echo "  $0 --tasks humaneval-ts,multiple-ts --num-samples 10"
+    echo "  # Both benchmarks"
+    echo "  $0 --tasks humaneval-ts,mbpp-ts --num-samples 10"
     echo ""
     echo "  # Custom endpoint"
     echo "  $0 --base-url http://remote-server:8000/v1 --model-name my-model"
@@ -217,7 +219,7 @@ if [ "$USE_DOCKER" = true ]; then
     EVAL_CMD="docker run --rm --network host"
     EVAL_CMD+=" -v $RUN_DIR:/outputs"
     EVAL_CMD+=" -e OPENAI_API_KEY=$API_KEY"
-    EVAL_CMD+=" nemotron-ts-eval:latest"
+    EVAL_CMD+=" gptoss-ts-eval:latest"
     EVAL_CMD+=" python -m src.eval.nemo_eval_runner"
 elif [ "$USE_NEMO" = true ]; then
     # NeMo Evaluator command

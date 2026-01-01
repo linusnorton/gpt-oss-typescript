@@ -137,7 +137,7 @@ def main() -> int:
             # Save collection stats
             stats_file = output_dir / "collection_stats.json"
             with open(stats_file, "w") as f:
-                json.dump(stats, f, indent=2)
+                json.dump(stats.to_dict(), f, indent=2)
 
     except KeyboardInterrupt:
         logger.warning("Collection interrupted by user")

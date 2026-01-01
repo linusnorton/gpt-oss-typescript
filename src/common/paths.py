@@ -88,7 +88,7 @@ def get_model_id() -> str:
     """Get the default model ID from environment."""
     return os.getenv(
         "MODEL_ID",
-        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16"
+        "unsloth/gpt-oss-20b"
     )
 
 

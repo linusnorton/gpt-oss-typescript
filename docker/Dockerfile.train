@@ -21,7 +21,7 @@ ARG PYTHON_VERSION=3.11
 
 # Labels
 LABEL maintainer="Your Name <your.email@example.com>"
-LABEL description="Nemotron TypeScript Post-Training - Training Image"
+LABEL description="GPT-OSS TypeScript Post-Training - Training Image"
 LABEL cuda.version="${CUDA_VERSION}"
 
 # Install system dependencies

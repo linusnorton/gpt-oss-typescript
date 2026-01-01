@@ -14,10 +14,13 @@ from typing import Any, Optional
 
 import yaml
 from openai import OpenAI
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
 
 from ..common.logging import get_logger, setup_logging
 from ..common.paths import get_output_dir
 
+console = Console()
 logger = get_logger(__name__)
 
 
@@ -25,10 +28,10 @@ logger = get_logger(__name__)
 class EvalConfig:
     """Configuration for evaluation."""
 
-    model_name: str = "nemotron"
+    model_name: str = "gpt-oss"
     base_url: str = "http://localhost:8000/v1"
     api_key: str = "EMPTY"
-    tasks: list[str] = field(default_factory=lambda: ["humaneval", "mbpp"])
+    tasks: list[str] = field(default_factory=lambda: ["humaneval-ts", "mbpp-ts"])
     output_dir: Path = field(default_factory=lambda: get_output_dir() / "eval")
     num_samples: int = 1
     temperature: float = 0.0
@@ -46,25 +49,15 @@ class CodeEvaluator:
 
     # Task definitions
     TASKS = {
-        "humaneval": {
-            "name": "HumanEval",
-            "language": "python",
-            "dataset": "openai_humaneval",
-        },
-        "mbpp": {
-            "name": "MBPP",
-            "language": "python",
-            "dataset": "mbpp",
-        },
         "humaneval-ts": {
             "name": "HumanEval TypeScript",
             "language": "typescript",
-            "dataset": "humaneval-x-typescript",
+            "dataset": "THUDM/humaneval-x",
         },
-        "multiple-ts": {
-            "name": "MultiPL-E TypeScript",
+        "mbpp-ts": {
+            "name": "MBPP TypeScript",
             "language": "typescript",
-            "dataset": "multiple-e-typescript",
+            "dataset": "nuprl/MultiPL-E",
         },
     }
 
@@ -75,6 +68,34 @@ class CodeEvaluator:
             api_key=config.api_key,
         )
         self.results: dict[str, Any] = {}
+
+    # Example prefix - model follows patterns better than instructions
+    SYSTEM_PROMPT = """// Example: Check if all elements are positive
+function all_positive(numbers: number[]): boolean {
+    for (let i = 0; i < numbers.length; i++) {
+        if (numbers[i] <= 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+"""
+
+    def _extract_function_body(self, completion: str) -> str:
+        """Extract function body up to the closing brace, handling nested braces."""
+        depth = 1  # We start inside the opening brace from the prompt
+        result = []
+        i = 0
+        while i < len(completion) and depth > 0:
+            char = completion[i]
+            result.append(char)
+            if char == '{':
+                depth += 1
+            elif char == '}':
+                depth -= 1
+            i += 1
+        return ''.join(result)
 
     def run_task(self, task_name: str) -> dict[str, Any]:
         """
@@ -91,40 +112,59 @@ class CodeEvaluator:
             return {"error": f"Unknown task: {task_name}"}
 
         task_info = self.TASKS[task_name]
-        logger.info(f"Running task: {task_info['name']}")
 
         # Load task prompts
         prompts = self._load_task_prompts(task_name)
         if not prompts:
             return {"error": "Failed to load prompts"}
 
-        # Generate completions
+        # Generate completions with progress bar
         completions = []
-        for i, prompt in enumerate(prompts):
-            logger.debug(f"Processing prompt {i + 1}/{len(prompts)}")
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeRemainingColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task(f"  {task_info['name']}", total=len(prompts))
 
-            try:
-                response = self.client.completions.create(
-                    model=self.config.model_name,
-                    prompt=prompt["prompt"],
-                    max_tokens=self.config.max_tokens,
-                    temperature=self.config.temperature,
-                    top_p=self.config.top_p,
-                    n=self.config.num_samples,
-                    stop=self.config.stop_sequences or None,
-                )
+            for prompt in prompts:
+                try:
+                    # Use stop tokens from dataset if available, else config
+                    stop_tokens = prompt.get("stop_tokens") or self.config.stop_sequences or None
+                    # Prepend system prompt to help model understand expected format
+                    full_prompt = self.SYSTEM_PROMPT + prompt["prompt"]
+                    response = self.client.completions.create(
+                        model=self.config.model_name,
+                        prompt=full_prompt,
+                        max_tokens=self.config.max_tokens,
+                        temperature=self.config.temperature,
+                        top_p=self.config.top_p,
+                        n=self.config.num_samples,
+                        stop=stop_tokens,
+                    )
 
-                completions.append({
-                    "task_id": prompt.get("task_id", f"task_{i}"),
-                    "prompt": prompt["prompt"],
-                    "completions": [c.text for c in response.choices],
-                })
-            except Exception as e:
-                logger.error(f"Generation failed for prompt {i}: {e}")
-                completions.append({
-                    "task_id": prompt.get("task_id", f"task_{i}"),
-                    "error": str(e),
-                })
+                    task_id = prompt.get("task_id", f"task_{len(completions)}")
+                    # Extract just the function body (up to closing brace)
+                    raw_completions = [c.text for c in response.choices]
+                    cleaned_completions = [self._extract_function_body(c) for c in raw_completions]
+                    completions.append({
+                        "task_id": task_id,
+                        "prompt": prompt["prompt"],
+                        "completions": cleaned_completions,
+                        "tests": prompt.get("tests", ""),
+                    })
+                except Exception as e:
+                    task_id = prompt.get("task_id", f"task_{len(completions)}")
+                    logger.error(f"Generation failed for {task_id}: {e}")
+                    completions.append({
+                        "task_id": task_id,
+                        "error": str(e),
+                    })
+
+                progress.advance(task)
 
         # Evaluate completions
         results = self._evaluate_completions(task_name, completions)
@@ -133,35 +173,35 @@ class CodeEvaluator:
 
     def _load_task_prompts(self, task_name: str) -> list[dict]:
         """Load prompts for a task."""
-        # Try to load from datasets library
         try:
             from datasets import load_dataset
 
-            task_info = self.TASKS[task_name]
-            if task_name == "humaneval":
-                dataset = load_dataset("openai/openai_humaneval", split="test")
+            if task_name == "humaneval-ts":
+                # MultiPL-E HumanEval TypeScript
+                dataset = load_dataset("nuprl/MultiPL-E", "humaneval-ts", split="test")
                 return [
                     {
-                        "task_id": item["task_id"],
+                        "task_id": item["name"],
                         "prompt": item["prompt"],
-                        "canonical_solution": item["canonical_solution"],
-                        "test": item["test"],
+                        "tests": item["tests"],
+                        "stop_tokens": item["stop_tokens"],
                     }
                     for item in dataset
                 ]
-            elif task_name == "mbpp":
-                dataset = load_dataset("mbpp", split="test")
+            elif task_name == "mbpp-ts":
+                # MultiPL-E MBPP TypeScript
+                dataset = load_dataset("nuprl/MultiPL-E", "mbpp-ts", split="test")
                 return [
                     {
-                        "task_id": str(item["task_id"]),
-                        "prompt": item["text"] + "\n" + item["code"].split("\n")[0],
-                        "code": item["code"],
-                        "test_list": item["test_list"],
+                        "task_id": item["name"],
+                        "prompt": item["prompt"],
+                        "tests": item["tests"],
+                        "stop_tokens": item["stop_tokens"],
                     }
                     for item in dataset
                 ]
             else:
-                logger.warning(f"Dataset loading for {task_name} not implemented")
+                logger.warning(f"Unknown task: {task_name}")
                 return []
 
         except ImportError:
@@ -171,43 +211,115 @@ class CodeEvaluator:
             logger.error(f"Failed to load dataset: {e}")
             return []
 
+    def _execute_code(self, code: str, timeout: int = 10) -> tuple[bool, str]:
+        """
+        Execute TypeScript code in a subprocess and return success/failure.
+
+        Returns:
+            Tuple of (passed, error_message)
+        """
+        import subprocess
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.ts', delete=False) as f:
+            f.write(code)
+            f.flush()
+            try:
+                # Use npx tsx for fast TypeScript execution (no tsconfig needed)
+                result = subprocess.run(
+                    ['npx', 'tsx', f.name],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+                if result.returncode == 0:
+                    return True, ""
+                else:
+                    return False, result.stderr[:500]
+            except subprocess.TimeoutExpired:
+                return False, "Timeout"
+            except Exception as e:
+                return False, str(e)
+            finally:
+                os.unlink(f.name)
+
     def _evaluate_completions(
         self,
         task_name: str,
         completions: list[dict],
     ) -> dict[str, Any]:
-        """Evaluate generated completions."""
-        # Basic pass@k calculation
+        """Evaluate generated completions by executing code."""
         passed = 0
         total = len(completions)
         errors = 0
+        failed_tasks = []
 
-        for comp in completions:
-            if "error" in comp:
-                errors += 1
-                continue
+        task_info = self.TASKS.get(task_name, {"name": task_name})
 
-            # For now, just count non-empty completions
-            # Full evaluation requires code execution
-            if comp.get("completions") and any(c.strip() for c in comp["completions"]):
-                passed += 1
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeRemainingColumn(),
+            console=console,
+        ) as progress:
+            eval_task = progress.add_task(f"  Evaluating {task_info['name']}", total=total)
+
+            for comp in completions:
+                if "error" in comp:
+                    errors += 1
+                    progress.advance(eval_task)
+                    continue
+
+                if not comp.get("completions"):
+                    errors += 1
+                    progress.advance(eval_task)
+                    continue
+
+                task_id = comp.get("task_id", "unknown")
+                prompt = comp.get("prompt", "")
+                generated = comp["completions"][0]  # Use first completion for pass@1
+
+                # Build full code to execute: prompt + completion + tests
+                tests = comp.get("tests", "")
+                full_code = prompt + generated + "\n" + tests
+
+                success, error = self._execute_code(full_code)
+                if success:
+                    passed += 1
+                else:
+                    failed_tasks.append({"task_id": task_id, "error": error[:200]})
+
+                progress.advance(eval_task)
+
+        pass_rate = passed / total if total > 0 else 0
 
         return {
             "task": task_name,
             "total_problems": total,
-            "completed": total - errors,
+            "passed": passed,
+            "failed": total - passed - errors,
             "errors": errors,
-            "pass_at_1": passed / total if total > 0 else 0,
-            "note": "Full execution-based evaluation requires sandbox environment",
+            "pass_at_1": pass_rate,
+            "failed_samples": failed_tasks[:10],  # First 10 failures for debugging
         }
 
     def run_all(self) -> dict[str, Any]:
         """Run all configured tasks."""
         results = {}
+        total_tasks = len(self.config.tasks)
 
-        for task in self.config.tasks:
-            logger.info(f"Starting task: {task}")
+        for idx, task in enumerate(self.config.tasks, 1):
+            console.print(f"\n[bold cyan][{idx}/{total_tasks}][/bold cyan] Running task: [bold]{task}[/bold]")
             results[task] = self.run_task(task)
+
+            # Show task result immediately
+            if "error" in results[task]:
+                console.print(f"  [red]✗[/red] {task}: [red]ERROR[/red] - {results[task]['error']}")
+            else:
+                pass_rate = results[task].get('pass_at_1', 0)
+                console.print(f"  [green]✓[/green] {task}: pass@1 = [bold]{pass_rate:.4f}[/bold]")
 
         # Compute summary
         summary = {
@@ -247,10 +359,10 @@ class CodeEvaluator:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run code evaluation benchmarks")
-    parser.add_argument("--model-name", type=str, default="nemotron")
+    parser.add_argument("--model-name", type=str, default="gpt-oss")
     parser.add_argument("--base-url", type=str, default="http://localhost:8000/v1")
     parser.add_argument("--api-key", type=str, default="EMPTY")
-    parser.add_argument("--tasks", type=str, default="humaneval,mbpp")
+    parser.add_argument("--tasks", type=str, default="humaneval-ts,mbpp-ts")
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--num-samples", type=int, default=1)
     parser.add_argument("--temperature", type=float, default=0.0)
@@ -270,20 +382,27 @@ def main() -> int:
         with open(args.config) as f:
             file_config = yaml.safe_load(f) or {}
 
-    # Build config from args and file
+    # Extract nested config values
+    model_config = file_config.get("model", {})
+    generation_config = file_config.get("generation", {})
+    output_config = file_config.get("output", {})
+
+    # Build config from args and file (args override file config)
     config = EvalConfig(
-        model_name=args.model_name,
-        base_url=args.base_url,
-        api_key=args.api_key,
+        model_name=args.model_name if args.model_name != "gpt-oss" else model_config.get("name", args.model_name),
+        base_url=args.base_url if args.base_url != "http://localhost:8000/v1" else model_config.get("base_url", args.base_url),
+        api_key=args.api_key if args.api_key != "EMPTY" else model_config.get("api_key", args.api_key),
         tasks=args.tasks.split(","),
-        output_dir=args.output_dir or Path(file_config.get("output_dir", "./outputs/eval")),
+        output_dir=args.output_dir or Path(output_config.get("dir", "./outputs/eval")),
         num_samples=args.num_samples,
-        temperature=args.temperature,
-        max_tokens=args.max_tokens,
+        temperature=args.temperature if args.temperature != 0.0 else generation_config.get("temperature", args.temperature),
+        max_tokens=args.max_tokens if args.max_tokens != 512 else generation_config.get("max_tokens", args.max_tokens),
+        top_p=generation_config.get("top_p", 1.0),
+        stop_sequences=generation_config.get("stop_sequences", []),
     )
 
-    logger.info(f"Running evaluation for model: {config.model_name}")
-    logger.info(f"Tasks: {config.tasks}")
+    console.print(f"Running evaluation for model: [bold]{config.model_name}[/bold]")
+    console.print(f"Tasks: {', '.join(config.tasks)}")
 
     evaluator = CodeEvaluator(config)
 
@@ -292,15 +411,15 @@ def main() -> int:
         evaluator.save_results(results)
 
         # Print summary
-        print("\n" + "=" * 50)
-        print("Evaluation Summary")
-        print("=" * 50)
+        console.print("\n" + "=" * 50)
+        console.print("[bold]Evaluation Summary[/bold]")
+        console.print("=" * 50)
         for task, data in results.get("results", {}).items():
             if "error" in data:
-                print(f"  {task}: ERROR - {data['error']}")
+                console.print(f"  {task}: [red]ERROR[/red] - {data['error']}")
             else:
-                print(f"  {task}: pass@1 = {data.get('pass_at_1', 0):.4f}")
-        print("=" * 50)
+                console.print(f"  {task}: pass@1 = [bold]{data.get('pass_at_1', 0):.4f}[/bold]")
+        console.print("=" * 50)
 
         return 0
 

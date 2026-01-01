@@ -1,4 +1,4 @@
-# Docker Compose for Nemotron TypeScript Post-Training
+# Docker Compose for GPT-OSS TypeScript Post-Training
 #
 # Usage:
 #   docker compose -f docker/docker-compose.yml up -d vllm
@@ -9,7 +9,7 @@
 #   - NVIDIA Container Toolkit installed
 #   - .env file with HF_TOKEN set
 
-name: nemotron-ts
+name: gptoss-ts
 
 services:
   # vLLM Inference Server
@@ -19,8 +19,8 @@ services:
       dockerfile: docker/Dockerfile.vllm
       args:
         CUDA_VERSION: ${CUDA_VERSION:-12.4.1}
-    image: nemotron-ts-vllm:latest
-    container_name: nemotron-vllm
+    image: gptoss-ts-vllm:latest
+    container_name: gptoss-vllm
     ports:
       - "${VLLM_PORT:-8000}:8000"
     volumes:
@@ -51,8 +51,8 @@ services:
       dockerfile: docker/Dockerfile.eval
       args:
         CUDA_VERSION: ${CUDA_VERSION:-12.4.1}
-    image: nemotron-ts-eval:latest
-    container_name: nemotron-eval
+    image: gptoss-ts-eval:latest
+    container_name: gptoss-eval
     volumes:
       - ../data:/app/data
       - ../outputs:/app/outputs
@@ -76,8 +76,8 @@ services:
       dockerfile: docker/Dockerfile.train
       args:
         CUDA_VERSION: ${CUDA_VERSION:-12.4.1}
-    image: nemotron-ts-train:latest
-    container_name: nemotron-train
+    image: gptoss-ts-train:latest
+    container_name: gptoss-train
     volumes:
       - ../data:/app/data
       - ../outputs:/app/outputs
@@ -106,8 +106,8 @@ services:
       dockerfile: docker/Dockerfile.eval
       args:
         CUDA_VERSION: ${CUDA_VERSION:-12.4.1}
-    image: nemotron-ts-eval:latest
-    container_name: nemotron-collect
+    image: gptoss-ts-eval:latest
+    container_name: gptoss-collect
     volumes:
       - ../data:/app/data
       - ../outputs:/app/outputs
@@ -123,8 +123,8 @@ services:
 
 volumes:
   hf-cache:
-    name: nemotron-hf-cache
+    name: gptoss-hf-cache
 
 networks:
   default:
-    name: nemotron-network
+    name: gptoss-network

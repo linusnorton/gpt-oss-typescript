@@ -22,9 +22,9 @@ echo ""
 cd "$PROJECT_ROOT"
 
 # Configuration
-PYTHON_VERSION="${PYTHON_VERSION:-python3.11}"
+PYTHON_VERSION="${PYTHON_VERSION:-python3.13}"
 VENV_DIR="${VENV_DIR:-.venv}"
-INSTALL_EXTRAS="${INSTALL_EXTRAS:-dev}"  # Options: dev, vllm, nemo, all
+INSTALL_EXTRAS="${INSTALL_EXTRAS:-vllm}"  # Options: dev, vllm, nemo, all
 
 # Check for required tools
 echo -e "${YELLOW}Checking prerequisites...${NC}"
@@ -32,7 +32,7 @@ echo -e "${YELLOW}Checking prerequisites...${NC}"
 # Check Python
 if ! command -v $PYTHON_VERSION &> /dev/null; then
     echo -e "${RED}Error: $PYTHON_VERSION not found${NC}"
-    echo "Please install Python 3.11 or set PYTHON_VERSION environment variable"
+    echo "Please install Python 3.13 or set PYTHON_VERSION environment variable"
     exit 1
 fi
 PYTHON_ACTUAL=$($PYTHON_VERSION --version)
@@ -166,6 +166,20 @@ if torch.cuda.is_available():
         print(f'  Device {i}: {torch.cuda.get_device_name(i)}')
 else:
     print('  Warning: CUDA not available in PyTorch')
+"
+
+# Verify Unsloth installation
+echo -e "\n${YELLOW}Verifying Unsloth...${NC}"
+python -c "
+try:
+    from unsloth import FastLanguageModel
+    import unsloth
+    version = getattr(unsloth, '__version__', 'unknown')
+    print(f'  Unsloth version: {version}')
+    print(f'  FastLanguageModel: available')
+except ImportError as e:
+    print(f'  Warning: Unsloth import failed: {e}')
+    print('  Try: pip install unsloth')
 "
 
 # Set up pre-commit hooks

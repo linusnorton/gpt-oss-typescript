@@ -1,5 +1,12 @@
 """
 Format agentic datasets for SFT training.
+
+Supports multiple output formats:
+- chatml: Standard ChatML format (used by GPT-OSS, Mistral, etc.)
+- alpaca: Alpaca instruction format
+- sharegpt: ShareGPT conversation format
+
+GPT-OSS-20B uses ChatML format by default.
 """
 
 import json
@@ -28,15 +35,9 @@ ALPACA_TEMPLATE = """### Instruction:
 ### Response:
 {response}"""
 
-# Nemotron format (based on their chat template)
-NEMOTRON_TEMPLATE = """<extra_id_0>System
-{system}
-
-<extra_id_1>User
-{user}
-
-<extra_id_1>Assistant
-{assistant}"""
+# GPT-OSS format (uses standard ChatML)
+# Note: GPT-OSS uses the same ChatML format as above
+GPTOSS_TEMPLATE = CHATML_TEMPLATE
 
 
 class AgenticFormatter:
@@ -57,7 +58,7 @@ class AgenticFormatter:
         Initialize formatter.
 
         Args:
-            format_type: Output format (chatml, alpaca, sharegpt, nemotron)
+            format_type: Output format (chatml, alpaca, sharegpt, gptoss)
             filter_typescript: Only include TypeScript/JavaScript examples
             include_tool_calls: Include tool/function call examples
             max_turns: Maximum conversation turns to include
@@ -70,7 +71,7 @@ class AgenticFormatter:
         self.templates = {
             "chatml": CHATML_TEMPLATE,
             "alpaca": ALPACA_TEMPLATE,
-            "nemotron": NEMOTRON_TEMPLATE,
+            "gptoss": GPTOSS_TEMPLATE,  # Same as ChatML
         }
 
     def format_dataset(self, dataset: Any) -> list[dict]:
@@ -195,8 +196,8 @@ class AgenticFormatter:
                     input="",
                     response=assistant_msg["content"],
                 )
-            elif self.format_type == "nemotron":
-                part = NEMOTRON_TEMPLATE.format(
+            elif self.format_type == "gptoss":
+                part = GPTOSS_TEMPLATE.format(
                     system=system or "You are a helpful assistant.",
                     user=user_msg["content"],
                     assistant=assistant_msg["content"],

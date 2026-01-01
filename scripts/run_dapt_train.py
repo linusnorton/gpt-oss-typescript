@@ -143,7 +143,7 @@ def main() -> int:
 
     # Override config with CLI args
     model_id = args.model_id or config.get("model_id") or os.getenv(
-        "MODEL_ID", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16"
+        "MODEL_ID", "unsloth/gpt-oss-20b"
     )
 
     train_data = args.train_data or Path(

@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--format",
-        choices=["chatml", "alpaca", "sharegpt", "nemotron"],
+        choices=["chatml", "alpaca", "sharegpt", "gptoss"],
         default="chatml",
         help="Output format for conversations",
     )

@@ -1,27 +1,28 @@
-# Nemotron TypeScript Post-Training Harness
+# GPT-OSS TypeScript Post-Training Harness
 
-A reproducible post-training and evaluation harness for **NVIDIA Nemotron 3 Nano 30B-A3B Base BF16**, optimized for TypeScript/JavaScript code assistant agents. Designed for single-GPU training using QLoRA-based workflows.
+A reproducible post-training and evaluation harness for **OpenAI GPT-OSS-20B** using Unsloth, optimized for TypeScript/JavaScript code assistant agents. Designed for single-GPU training using QLoRA workflows.
 
 ## Overview
 
 This project provides a complete pipeline for:
 
 1. **Domain-Adaptive Pre-Training (DAPT)** - Continued pre-training on TypeScript/JavaScript corpora using next-token prediction
-2. **Supervised Fine-Tuning (SFT)** - Instruction tuning using Nemotron-Agentic-v1 for tool use and agent trajectories
-3. **Evaluation** - Benchmark evaluation via NeMo Evaluator and repo-based "patch tasks" for agent realism
+2. **Supervised Fine-Tuning (SFT)** - Instruction tuning for tool use and agent trajectories
+3. **Evaluation** - Benchmark evaluation via HumanEval/MBPP and repo-based "patch tasks" for agent realism
 
-### Why Nemotron 3 Nano 30B-A3B?
+### Why GPT-OSS-20B?
 
-- **Mixture of Experts (MoE)**: 30B total parameters with only 3B active per forward pass
-- **Efficient inference**: MoE architecture enables fast inference despite large parameter count
-- **128K context**: Native support for long code files and multi-file context
-- **Strong base**: Built on NVIDIA's Nemotron architecture with excellent code understanding
+- **Mixture of Experts (MoE)**: 21B total parameters with only 3.6B active per forward pass
+- **Efficient training**: Fits in ~14GB VRAM with Unsloth QLoRA
+- **Fast inference**: ~16GB VRAM, 30-50 tokens/second without CPU offloading
+- **Apache 2.0**: Permissive open-source license
+- **Strong base**: Built on OpenAI's architecture with excellent code understanding
 
 ## Evaluation Layers
 
 ### A) Benchmark Evaluation
 
-Uses NeMo Evaluator with BigCode harness tasks:
+Uses standard code benchmarks:
 - **HumanEval** - Python function completion
 - **MBPP** - Python programming problems
 - **HumanEval-TS** - TypeScript function completion (when available)
@@ -43,39 +44,33 @@ Continued pre-training on TypeScript/JavaScript code:
 - Collects permissively-licensed repositories from GitHub
 - Builds deduplicated, sanitized training corpus
 - Uses next-token prediction objective
-- QLoRA for memory-efficient single-GPU training
+- QLoRA via Unsloth for memory-efficient single-GPU training
 
 ### B) Supervised Fine-Tuning (SFT)
 
 Instruction tuning for agent capabilities:
-- Uses Nemotron-Agentic-v1 dataset
+- Uses agentic instruction datasets
 - Trains on tool use and instruction trajectories
 - ChatML format for conversation structure
 - Optional TypeScript-specific filtering
-
-### C) Preference Tuning (Future)
-
-DPO/ORPO for alignment:
-- Collect preference data from model outputs
-- Train reward model or direct preference optimization
-- Integrate with existing pipeline (documented in `configs/`)
 
 ## Quick Start
 
 ### Prerequisites
 
-- Ubuntu 22.04+
-- NVIDIA GPU with 48GB+ VRAM (80GB recommended)
-- NVIDIA Driver 580+
-- Python 3.11
+- Ubuntu 22.04+ (24.04 recommended)
+- NVIDIA GPU with 16GB+ VRAM (24GB+ recommended for larger context)
+  - RTX 4090/4080/3090: Well supported
+  - RTX 5090/5080 (Blackwell): Requires CUDA 13.0+
+- Python 3.11+
 - Node.js 24 (for repo-based evaluation)
 
 ### Setup
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/nemotron-ts-posttrain-harness.git
-cd nemotron-ts-posttrain-harness
+git clone https://github.com/yourusername/gptoss-ts-posttrain-harness.git
+cd gptoss-ts-posttrain-harness
 
 # Run setup (creates venv, installs deps, validates GPU)
 make setup
@@ -109,58 +104,27 @@ make serve-vllm       # Start inference server
 make eval             # Run benchmarks
 ```
 
-## CUDA Compatibility
+## Memory Requirements
 
-### Understanding CUDA Versions
+### Training (QLoRA via Unsloth)
 
-There are three distinct CUDA-related versions to consider:
+| Configuration | VRAM Required | Notes |
+|---------------|---------------|-------|
+| QLoRA (r=64) | ~14GB | Default, fits RTX 4090 |
+| QLoRA (r=128) | ~18GB | Higher capacity |
+| Full LoRA (BF16) | ~44GB | Requires A100/H100 |
 
-| Component | Description | How to Check |
-|-----------|-------------|--------------|
-| **Driver CUDA** | Maximum CUDA version supported by your NVIDIA driver | `nvidia-smi` header |
-| **Toolkit (nvcc)** | Locally installed CUDA development toolkit | `nvcc --version` |
-| **PyTorch CUDA** | CUDA version bundled with PyTorch wheels | `python -c "import torch; print(torch.version.cuda)"` |
+### Inference (vLLM)
 
-**Key insight**: You don't need nvcc installed locally. PyTorch and vLLM ship with their own CUDA runtime. The driver just needs to support a compatible CUDA version.
-
-### Compatibility Matrix
-
-| Driver Version | Max CUDA | Recommended PyTorch | vLLM Support |
-|----------------|----------|---------------------|--------------|
-| 580.x          | 12.8     | 2.4+ (CUDA 12.4)    | 0.6+         |
-| 550.x          | 12.4     | 2.4+ (CUDA 12.4)    | 0.6+         |
-| 535.x          | 12.2     | 2.2+ (CUDA 12.1)    | 0.5+         |
-| 525.x          | 12.0     | 2.1+ (CUDA 11.8)    | 0.4+         |
-
-### Docker CUDA Configuration
-
-All Dockerfiles accept a `CUDA_VERSION` build argument:
-
-```bash
-# Default (CUDA 12.4.1)
-make docker-build
-
-# Custom CUDA version
-make docker-build CUDA_VERSION=12.1.1
-
-# Or directly
-docker build --build-arg CUDA_VERSION=12.1.1 -f docker/Dockerfile.train .
-```
-
-### Detecting Your System
-
-```bash
-# Run system info collection
-./scripts/system_info.sh
-
-# View results
-cat outputs/system_info.json | jq '.nvidia'
-```
+| Configuration | VRAM Required | Notes |
+|---------------|---------------|-------|
+| Default | ~16GB | 4K context |
+| Extended context | ~20GB | 8K context |
 
 ## Repository Structure
 
 ```
-nemotron-ts-posttrain-harness/
+gptoss-ts-posttrain-harness/
 ├── README.md                 # This file
 ├── .gitignore
 ├── .env.example              # Environment template
@@ -213,7 +177,7 @@ nemotron-ts-posttrain-harness/
 │   └── train/                # Training
 │       ├── dapt/
 │       │   ├── data_collator.py
-│       │   └── train_hf_peft.py
+│       │   └── train_unsloth.py
 │       └── sft/
 │           └── format_agentic.py
 │
@@ -241,12 +205,12 @@ DATA_DIR=./data
 OUTPUT_DIR=./outputs
 
 # Model
-MODEL_ID=nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+MODEL_ID=unsloth/gpt-oss-20b
 
-# Training
-TRAIN_BATCH_SIZE=1
-TRAIN_GRADIENT_ACCUMULATION_STEPS=8
-TRAIN_LEARNING_RATE=2e-5
+# Training (via Unsloth)
+TRAIN_BATCH_SIZE=2
+TRAIN_GRADIENT_ACCUMULATION_STEPS=4
+TRAIN_LEARNING_RATE=2e-4
 QLORA_R=64
 QLORA_ALPHA=16
 ```
@@ -256,17 +220,20 @@ QLORA_ALPHA=16
 Edit `configs/dapt_train.yaml`:
 
 ```yaml
+# Model (Unsloth's gpt-oss-20b for QLoRA)
+model_id: "unsloth/gpt-oss-20b"
+
 # LoRA settings
 lora:
   r: 64                    # Rank (higher = more capacity, more memory)
   alpha: 16                # Scaling factor
-  dropout: 0.05
+  dropout: 0.0             # Unsloth optimized (0 dropout)
 
 # Training
 training:
-  batch_size: 1
-  gradient_accumulation_steps: 8  # Effective batch = 8
-  learning_rate: 2.0e-5
+  batch_size: 2
+  gradient_accumulation_steps: 4  # Effective batch = 8
+  learning_rate: 2.0e-4
   num_epochs: 3
 ```
 
@@ -276,17 +243,20 @@ training:
 
 ```bash
 # Serve base model
-./scripts/serve_vllm.sh --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+./scripts/serve_vllm.sh --model unsloth/gpt-oss-20b
+
+# Serve merged fine-tuned model
+./scripts/serve_vllm.sh --model ./outputs/checkpoints/dapt/merged
 
 # Serve with LoRA adapter
 ./scripts/serve_vllm.sh \
-  --model ./outputs/checkpoints/dapt/final \
-  --lora ./outputs/checkpoints/sft/final
+  --model unsloth/gpt-oss-20b \
+  --lora ./outputs/checkpoints/dapt/final
 
 # Reduced memory usage
 ./scripts/serve_vllm.sh \
   --gpu-memory-util 0.8 \
-  --max-model-len 4096
+  --max-model-len 2048
 ```
 
 ### vLLM Options
@@ -295,22 +265,18 @@ training:
 |--------|---------|-------------|
 | `--model` | From .env | Model ID or path |
 | `--lora` | - | LoRA adapter path |
-| `--dtype` | bfloat16 | Data type |
+| `--dtype` | auto | Data type |
 | `--gpu-memory-util` | 0.90 | GPU memory fraction |
-| `--max-model-len` | 8192 | Maximum sequence length |
+| `--max-model-len` | 4096 | Maximum sequence length |
 | `--port` | 8000 | Server port |
-| `--tensor-parallel` | 1 | Number of GPUs |
+| `--served-name` | gpt-oss | Model name in API |
 
-### Nemotron MoE Notes
+### GPT-OSS Notes
 
-Nemotron 3 Nano 30B-A3B is a Mixture of Experts model:
-- Total parameters: 30B
-- Active parameters: 3B per forward pass
-- Memory requirement: ~60GB in BF16
-
-For GPUs with less than 60GB VRAM:
-- Use `--quantization awq` or `--quantization gptq` (~20-30GB)
-- Use `--tensor-parallel 2` across multiple GPUs
+GPT-OSS-20B is a Mixture of Experts model:
+- Total parameters: 21B
+- Active parameters: 3.6B per forward pass
+- Memory requirement: ~16GB in MXFP4
 
 ## Docker Workflow
 
@@ -398,17 +364,20 @@ make typecheck      # Run mypy
 **"CUDA out of memory"**
 - Reduce `--gpu-memory-util` to 0.8 or lower
 - Reduce `--max-model-len`
-- Use `--quantization awq`
+- Use smaller batch size in training
 
-**"Model not found" for Nemotron**
+**"Model not found"**
 - Ensure `HF_TOKEN` is set
-- Accept model license on HuggingFace website
 - Check: `huggingface-cli whoami`
 
 **vLLM fails to start**
 - Check vLLM version: `pip show vllm`
 - Ensure CUDA compatibility
 - Try: `pip install -U vllm`
+
+**Unsloth import error**
+- Ensure Unsloth is installed: `pip install unsloth`
+- Check for version compatibility
 
 **GitHub API rate limit**
 - Reduce `max_repos` in config
@@ -434,11 +403,12 @@ This project emphasizes reproducibility:
 
 This project is licensed under the Apache License 2.0.
 
-**Note**: The Nemotron model has its own license. Check the model card on HuggingFace before use.
+**Note**: GPT-OSS-20B is licensed under Apache 2.0. Check the model card on HuggingFace for details.
 
 ## Acknowledgments
 
-- NVIDIA for Nemotron models and NeMo toolkit
+- OpenAI for GPT-OSS model
+- Unsloth for efficient training framework
 - HuggingFace for Transformers and PEFT libraries
 - vLLM team for efficient serving infrastructure
 - BigCode for evaluation benchmarks

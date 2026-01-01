@@ -1,14 +1,14 @@
 [project]
-name = "nemotron-ts-posttrain"
+name = "gptoss-ts-posttrain"
 version = "0.1.0"
-description = "Post-training and evaluation harness for NVIDIA Nemotron 3 Nano 30B-A3B, tuned for TypeScript/JavaScript code agents"
+description = "Post-training and evaluation harness for OpenAI GPT-OSS-20B with Unsloth, tuned for TypeScript/JavaScript code agents"
 readme = "README.md"
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.11,<3.14"
 license = {text = "Apache-2.0"}
 authors = [
     {name = "Your Name", email = "your.email@example.com"}
 ]
-keywords = ["llm", "nemotron", "typescript", "fine-tuning", "qlora", "code-generation"]
+keywords = ["llm", "gpt-oss", "openai", "typescript", "fine-tuning", "qlora", "unsloth", "code-generation"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -17,6 +17,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
@@ -25,13 +26,9 @@ dependencies = [
     "torch>=2.4.0",
     "transformers>=4.45.0",
     "accelerate>=0.34.0",
-    "peft>=0.13.0",
-    "bitsandbytes>=0.44.0",
+    "unsloth>=2024.12",
     "datasets>=3.0.0",
     "safetensors>=0.4.0",
-
-    # Quantization
-    "auto-gptq>=0.7.0",
 
     # Data processing
     "tiktoken>=0.7.0",
@@ -82,21 +79,25 @@ vllm = [
     "ray>=2.35.0",
 ]
 
+quantization = [
+    "auto-gptq>=0.7.0",
+]
+
 nemo = [
     "nemo-toolkit[all]>=2.0.0",
 ]
 
 [project.scripts]
-nemotron-train = "src.train.dapt.train_hf_peft:main"
-nemotron-eval = "src.eval.nemo_eval_runner:main"
+gptoss-train = "src.train.dapt.train_unsloth:main"
+gptoss-eval = "src.eval.nemo_eval_runner:main"
 collect-repos = "src.data.github.github_client:main"
 build-corpus = "src.data.corpus.pack_jsonl:main"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/nemotron-ts-posttrain-harness"
-Documentation = "https://github.com/yourusername/nemotron-ts-posttrain-harness#readme"
-Repository = "https://github.com/yourusername/nemotron-ts-posttrain-harness"
-Issues = "https://github.com/yourusername/nemotron-ts-posttrain-harness/issues"
+Homepage = "https://github.com/linusnorton/gpt-oss-typescript"
+Documentation = "https://github.com/linusnorton/gpt-oss-typescript#readme"
+Repository = "https://github.com/linusnorton/gpt-oss-typescript"
+Issues = "https://github.com/linusnorton/gpt-oss-typescript/issues"
 
 [build-system]
 requires = ["hatchling"]
