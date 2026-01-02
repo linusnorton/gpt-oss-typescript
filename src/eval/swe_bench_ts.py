@@ -1,8 +1,8 @@
 """
 SWE-bench TypeScript Evaluator.
 
-Runs Multi-SWE-bench TypeScript instances with agentic evaluation.
-Uses the Responses API directly with custom tool execution loop.
+Generates predictions for Multi-SWE-bench TypeScript instances using an agentic loop.
+Uses the official Multi-SWE-bench harness for evaluation.
 """
 
 import json
@@ -11,12 +11,19 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from huggingface_hub import hf_hub_download
 from openai import OpenAI
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    BarColumn,
+    TaskProgressColumn,
+    TimeRemainingColumn,
+)
 
 from ..common.logging import get_logger
 from ..common.paths import get_output_dir
@@ -31,23 +38,31 @@ logger = get_logger(__name__)
 
 AGENT_INSTRUCTIONS = """You are an expert software engineer fixing a bug in a TypeScript repository.
 
+AVAILABLE TOOLS:
+- bash(command): Run shell commands (grep, find, cat, sed, git, etc.)
+- submit(): Call when you have finished fixing the bug
+
+NOTE: There is NO apply_patch tool. Use sed -i or echo/cat with redirection to edit files.
+
 Workflow:
 1. Use grep/find to locate the relevant code files
 2. Use cat or sed -n to view the buggy code
-3. Use sed -i to make the fix (in-place edit)
+3. Use sed -i 's/old/new/' to make the fix (in-place edit)
 4. Use git diff to verify your changes are correct
-5. Call submit() when done fixing the bug
+5. Call submit() when done
+
+Example edit: sed -i 's/buggyCode/fixedCode/g' src/file.ts
 
 Rules:
 - Make minimal, focused changes
 - Do NOT modify test files
-- Always verify changes with git diff before submitting
-- If stuck, try a different approach"""
+- Always verify changes with git diff before submitting"""
 
 
 # =============================================================================
 # Configuration
 # =============================================================================
+
 
 @dataclass
 class SWEBenchConfig:
@@ -59,18 +74,25 @@ class SWEBenchConfig:
     max_turns: int = 30  # Max agent turns
     max_workers: int = 8  # Parallel repo evaluations
     timeout: int = 300  # 5 min per instance
-    output_dir: Path = field(default_factory=lambda: get_output_dir() / "swe-bench-ts")
+    output_dir: Path = field(
+        default_factory=lambda: get_output_dir() / "swe-bench-ts"
+    )
+    repo_cache_dir: Path = field(
+        default_factory=lambda: Path("data/swe-bench/repo-cache")
+    )
 
 
 # =============================================================================
-# SWE-Bench Evaluator
+# SWE-Bench Prediction Generator
 # =============================================================================
 
-class SWEBenchTSEvaluator:
+
+class SWEBenchTSPredictor:
     """
-    Evaluator for SWE-bench TypeScript tasks.
+    Generates predictions for SWE-bench TypeScript tasks.
 
-    Uses the OpenAI Agents SDK with gpt-oss for proper tool calling.
+    Uses an agentic loop to generate patches, then outputs in
+    Multi-SWE-bench format for evaluation with the official harness.
     """
 
     # TypeScript repos in Multi-SWE-bench
@@ -83,7 +105,47 @@ class SWEBenchTSEvaluator:
     def __init__(self, config: SWEBenchConfig):
         self.config = config
         self.instances: list[dict] = []
-        self.results: list[dict] = []
+        self.predictions: list[dict] = []
+        self._repo_locks: dict[str, Any] = {}  # Locks for repo cache operations
+        import threading
+        self._cache_lock = threading.Lock()
+
+    def _ensure_repo_cached(self, org: str, repo: str) -> Path:
+        """Ensure repo is cloned to cache. Returns cache path."""
+        cache_dir = self.config.repo_cache_dir / org / repo
+
+        # Use lock to prevent parallel clones of same repo
+        repo_key = f"{org}/{repo}"
+        with self._cache_lock:
+            if repo_key not in self._repo_locks:
+                import threading
+                self._repo_locks[repo_key] = threading.Lock()
+
+        with self._repo_locks[repo_key]:
+            if cache_dir.exists() and (cache_dir / ".git").exists():
+                # Already cached, just fetch latest
+                logger.debug(f"Repo {repo_key} already cached")
+                return cache_dir
+
+            # Clone with full history to cache
+            logger.info(f"Caching repo {repo_key}...")
+            cache_dir.parent.mkdir(parents=True, exist_ok=True)
+
+            clone_result = subprocess.run(
+                [
+                    "git", "clone", "--bare",
+                    f"https://github.com/{org}/{repo}.git",
+                    str(cache_dir),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=600,  # 10 min for full clone
+            )
+            if clone_result.returncode != 0:
+                raise RuntimeError(f"Clone failed: {clone_result.stderr[:200]}")
+
+            logger.info(f"Cached {repo_key}")
+            return cache_dir
 
     def load_instances(self) -> int:
         """Load all TypeScript instances from Multi-SWE-bench."""
@@ -107,9 +169,11 @@ class SWEBenchTSEvaluator:
         logger.info(f"Total instances: {len(self.instances)}")
         return len(self.instances)
 
-    def _build_input(self, instance: dict) -> str:
-        """Build the input message for an instance."""
-        issue = instance["resolved_issues"][0] if instance["resolved_issues"] else {}
+    def _build_prompt(self, instance: dict) -> str:
+        """Build the prompt for an instance."""
+        issue = (
+            instance["resolved_issues"][0] if instance["resolved_issues"] else {}
+        )
         title = issue.get("title", "No title")
         body = issue.get("body", "No description")
 
@@ -119,14 +183,19 @@ class SWEBenchTSEvaluator:
 
         return f"Fix this bug:\n\n## {title}\n\n{body}"
 
-    def _create_tools(self, repo_dir: Path) -> tuple[dict[str, Callable], dict]:
-        """Create tool functions for the agent."""
+    def _run_agent(
+        self, instance: dict, repo_dir: Path
+    ) -> tuple[bool, str, list[dict]]:
+        """
+        Run the agent to generate a fix.
+
+        Returns:
+            (submitted, patch, trajectory)
+        """
         submitted = {"value": False}
 
         def bash(command: str) -> str:
-            """Execute a bash command in the repository to explore and modify code."""
-            logger.info(f"BASH TOOL CALLED: {command[:100]}")
-
+            """Execute a bash command."""
             if not command.strip():
                 return "Error: Empty command"
 
@@ -147,7 +216,6 @@ class SWEBenchTSEvaluator:
                 output = result.stdout + result.stderr
                 if len(output) > 4000:
                     output = output[:4000] + "\n... (truncated)"
-                logger.info(f"BASH OUTPUT: {output[:200]}")
                 return output if output.strip() else "(no output)"
             except subprocess.TimeoutExpired:
                 return "Error: Command timed out after 60s"
@@ -155,58 +223,34 @@ class SWEBenchTSEvaluator:
                 return f"Error: {str(e)[:200]}"
 
         def submit() -> str:
-            """Call this when you have finished fixing the bug."""
+            """Mark the solution as complete."""
             submitted["value"] = True
             return "Solution submitted successfully."
 
         tools = {"bash": bash, "submit": submit}
-        return tools, submitted
-
-    def _get_tool_definitions(self) -> list[dict]:
-        """Get Responses API-format tool definitions."""
-        return [
+        tool_defs = [
             {
                 "type": "function",
                 "name": "bash",
-                "description": "Execute a bash command in the repository to explore and modify code.",
+                "description": "Execute a bash command in the repository.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "command": {
                             "type": "string",
-                            "description": "The bash command to execute"
+                            "description": "The bash command to execute",
                         }
                     },
-                    "required": ["command"]
-                }
+                    "required": ["command"],
+                },
             },
             {
                 "type": "function",
                 "name": "submit",
-                "description": "Call this when you have finished fixing the bug.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            }
+                "description": "Call when you have finished fixing the bug.",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
         ]
-
-    def _run_agent(
-        self,
-        instance: dict,
-        repo_dir: Path,
-        debug: bool = False
-    ) -> tuple[bool, str, list[dict]]:
-        """
-        Run the agent to fix the bug using the Responses API directly.
-
-        Returns:
-            (submitted, patch, trajectory)
-        """
-        # Create tools bound to this repo
-        tools, submitted_flag = self._create_tools(repo_dir)
-        tool_defs = self._get_tool_definitions()
 
         # Create OpenAI client pointing to vLLM
         client = OpenAI(
@@ -214,109 +258,86 @@ class SWEBenchTSEvaluator:
             api_key=self.config.api_key,
         )
 
-        # Build the input with instructions
-        input_text = AGENT_INSTRUCTIONS + "\n\n" + self._build_input(instance)
-
-        # Run the agent loop - vLLM Responses API uses string input, so we build
-        # a conversation string that includes previous turns
+        # Build conversation
+        conversation = AGENT_INSTRUCTIONS + "\n\n" + self._build_prompt(instance)
         trajectory = []
-        conversation = input_text
 
         for turn in range(self.config.max_turns):
             try:
-                # Call the Responses API
                 response = client.responses.create(
                     model=self.config.model_name,
                     input=conversation,
                     tools=tool_defs,
                 )
 
-                # Extract tool calls from response output
+                # Extract tool calls
                 tool_calls = []
                 text_output = ""
 
                 for item in response.output:
-                    item_type = getattr(item, 'type', None)
+                    item_type = getattr(item, "type", None)
 
-                    # Handle function_call (ResponseFunctionToolCall)
-                    if item_type == 'function_call':
-                        tool_calls.append({
-                            "id": getattr(item, 'call_id', getattr(item, 'id', f'call_{turn}')),
-                            "name": item.name,
-                            "arguments": item.arguments,
-                        })
+                    if item_type == "function_call":
+                        tool_calls.append(
+                            {
+                                "name": item.name,
+                                "arguments": item.arguments,
+                            }
+                        )
+                    elif item_type == "message":
+                        content = getattr(item, "content", "")
+                        if isinstance(content, list):
+                            text_output = "".join(
+                                getattr(p, "text", str(p))
+                                if hasattr(p, "text")
+                                else str(p)
+                                for p in content
+                            )
+                        elif hasattr(content, "text"):
+                            text_output = content.text
+                        else:
+                            text_output = str(content) if content else ""
 
-                    # Handle mcp_call (McpCall) - same as function_call for our purposes
-                    elif item_type == 'mcp_call':
-                        tool_calls.append({
-                            "id": getattr(item, 'id', f'mcp_{turn}'),
-                            "name": item.name,
-                            "arguments": item.arguments,
-                        })
+                trajectory.append(
+                    {
+                        "turn": turn + 1,
+                        "tool_calls": [
+                            {"name": tc["name"], "args": tc["arguments"][:100]}
+                            for tc in tool_calls
+                        ],
+                        "text": text_output[:200] if text_output else "",
+                    }
+                )
 
-                    # Handle text output
-                    elif item_type == 'message':
-                        text_output = getattr(item, 'content', '')
-
-                # Log trajectory
-                traj_entry = {
-                    "turn": turn + 1,
-                    "tool_calls": [{"name": tc["name"], "args": tc["arguments"][:100]} for tc in tool_calls],
-                    "text": text_output[:200] if text_output else "",
-                }
-                trajectory.append(traj_entry)
-
-                if debug:
-                    logger.info(f"Turn {turn + 1}: {len(tool_calls)} tool calls")
-
-                # If no tool calls, agent is done
                 if not tool_calls:
-                    if debug:
-                        logger.info(f"Agent finished after {turn + 1} turns (no tool calls)")
                     break
 
-                # Execute tool calls and collect results
-                tool_results = []
+                # Execute tools
                 for tc in tool_calls:
-                    tool_name = tc["name"]
                     try:
                         args = json.loads(tc["arguments"])
                     except json.JSONDecodeError:
                         args = {}
 
-                    if tool_name in tools:
-                        if tool_name == "bash":
-                            result = tools["bash"](args.get("command", ""))
-                        elif tool_name == "submit":
-                            result = tools["submit"]()
-                        else:
-                            result = f"Unknown tool: {tool_name}"
+                    if tc["name"] == "bash":
+                        result = bash(args.get("command", ""))
+                    elif tc["name"] == "submit":
+                        result = submit()
                     else:
-                        result = f"Tool not found: {tool_name}"
+                        result = f"Unknown tool: {tc['name']}"
 
-                    tool_results.append({
-                        "name": tool_name,
-                        "args": tc["arguments"],
-                        "output": result,
-                    })
+                    conversation += f"\n\n[Tool: {tc['name']}({tc['arguments']})]\n"
+                    conversation += f"[Result: {result[:2000]}]\n"
 
-                # Check if submitted
-                if submitted_flag["value"]:
-                    if debug:
-                        logger.info(f"Agent submitted after {turn + 1} turns")
+                if submitted["value"]:
                     break
-
-                # Append tool calls and results to conversation for next turn
-                for tc, tr in zip(tool_calls, tool_results):
-                    conversation += f"\n\n[Tool Call: {tc['name']}({tc['arguments']})]\n"
-                    conversation += f"[Tool Result: {tr['output'][:2000]}]\n"
 
             except Exception as e:
                 logger.error(f"Agent error on turn {turn + 1}: {e}")
                 trajectory.append({"turn": turn + 1, "error": str(e)[:500]})
                 break
 
-        # Generate the patch from git diff
+        # Get the patch
         patch = ""
         try:
             diff_result = subprocess.run(
@@ -330,55 +351,57 @@ class SWEBenchTSEvaluator:
         except Exception as e:
             logger.error(f"Failed to get git diff: {e}")
 
-        return submitted_flag["value"], patch, trajectory
+        return submitted["value"], patch, trajectory
 
-    def _evaluate_instance(self, instance: dict) -> dict:
-        """Evaluate a single instance with agentic patch generation."""
-        instance_id = instance["instance_id"]
+    def _generate_prediction(self, instance: dict) -> dict:
+        """Generate a prediction for a single instance."""
         org = instance["org"]
         repo = instance["repo"]
-        gold_patch = instance.get("fix_patch", "")
+        number = instance["number"]
+        base_sha = instance.get("base", {}).get("sha")
 
-        result = {
-            "instance_id": instance_id,
+        prediction = {
             "org": org,
             "repo": repo,
-            "resolved": False,
+            "number": number,
+            "fix_patch": "",
             "submitted": False,
-            "patch_valid": False,
-            "files_match": False,
-            "iterations": 0,
             "error": None,
-            "generated_patch": "",
-            "gold_patch": gold_patch,
             "trajectory": [],
         }
 
-        # Clone repo for agentic access
+        if not base_sha:
+            prediction["error"] = "No base commit SHA"
+            return prediction
+
+        try:
+            # Ensure repo is cached (clones once, reuses after)
+            cache_dir = self._ensure_repo_cached(org, repo)
+        except Exception as e:
+            prediction["error"] = f"Cache failed: {str(e)[:200]}"
+            return prediction
+
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_dir = Path(tmpdir) / repo
 
             try:
-                # Get the base commit (the version BEFORE the fix)
-                base_info = instance.get("base", {})
-                base_sha = base_info.get("sha")
-
-                if not base_sha:
-                    result["error"] = "No base commit SHA in instance"
-                    return result
-
-                # Clone repo (need enough depth to reach base commit)
+                # Clone from local cache (fast, uses hardlinks)
                 clone_result = subprocess.run(
-                    ["git", "clone", "--depth", "100", f"https://github.com/{org}/{repo}.git", str(repo_dir)],
+                    [
+                        "git", "clone",
+                        "--shared",  # Use objects from cache
+                        str(cache_dir),
+                        str(repo_dir),
+                    ],
                     capture_output=True,
                     text=True,
-                    timeout=120,
+                    timeout=60,
                 )
                 if clone_result.returncode != 0:
-                    result["error"] = f"Clone failed: {clone_result.stderr[:200]}"
-                    return result
+                    prediction["error"] = f"Local clone failed: {clone_result.stderr[:200]}"
+                    return prediction
 
-                # Checkout the base commit (the buggy version)
+                # Checkout base commit (should already have it from full cache)
                 checkout_result = subprocess.run(
                     ["git", "checkout", base_sha],
                     cwd=repo_dir,
@@ -387,110 +410,56 @@ class SWEBenchTSEvaluator:
                     timeout=30,
                 )
                 if checkout_result.returncode != 0:
-                    # If shallow clone doesn't have the commit, fetch it
-                    fetch_result = subprocess.run(
-                        ["git", "fetch", "--depth=1", "origin", base_sha],
-                        cwd=repo_dir,
-                        capture_output=True,
-                        text=True,
-                        timeout=60,
-                    )
-                    if fetch_result.returncode == 0:
-                        subprocess.run(
-                            ["git", "checkout", base_sha],
-                            cwd=repo_dir,
-                            capture_output=True,
-                            text=True,
-                        )
-                    else:
-                        logger.warning(f"Could not checkout base commit {base_sha[:8]}, using HEAD")
+                    prediction["error"] = f"Checkout failed: {checkout_result.stderr[:200]}"
+                    return prediction
 
-                # Run the agent
-                submitted, patch, trajectory = self._run_agent(instance, repo_dir, debug=False)
+                # Run agent
+                submitted, patch, trajectory = self._run_agent(instance, repo_dir)
 
-                result["submitted"] = submitted
-                result["generated_patch"] = patch
-                result["trajectory"] = trajectory
-                result["iterations"] = len(trajectory)  # Number of agent turns
+                prediction["submitted"] = submitted
+                prediction["fix_patch"] = patch
+                prediction["trajectory"] = trajectory
 
             except subprocess.TimeoutExpired:
-                result["error"] = "Clone timeout"
-                return result
+                prediction["error"] = "Timeout"
             except Exception as e:
-                result["error"] = f"Error: {str(e)[:200]}"
-                return result
+                prediction["error"] = str(e)[:200]
 
-        # Evaluate the generated patch
-        if not patch or "diff" not in patch.lower():
-            result["error"] = "No changes made"
-            return result
+        return prediction
 
-        # Check 1: Is the patch syntactically valid?
-        lines = patch.split("\n")
-        has_diff = any(l.startswith("diff --git") or l.startswith("diff ") for l in lines)
-        has_changes = any(
-            l.startswith("-") or l.startswith("+")
-            for l in lines
-            if not l.startswith("---") and not l.startswith("+++")
-        )
-
-        if has_diff and has_changes:
-            result["patch_valid"] = True
-        else:
-            result["error"] = "Invalid patch format"
-            return result
-
-        # Check 2: Does it modify the same files as gold patch?
-        def extract_files(patch_text: str) -> set:
-            files = set()
-            for line in patch_text.split("\n"):
-                if line.startswith("diff --git"):
-                    parts = line.split(" b/")
-                    if len(parts) >= 2:
-                        files.add(parts[1].strip())
-            return files
-
-        gen_files = extract_files(patch)
-        gold_files = extract_files(gold_patch)
-
-        if gen_files & gold_files:  # Any overlap
-            result["files_match"] = True
-
-        # Check 3: Consider it "resolved" if patch is valid and modifies right files
-        if result["patch_valid"] and result["files_match"]:
-            result["resolved"] = True
-
-        return result
-
-    def _evaluate_instance_safe(self, instance: dict) -> dict:
-        """Wrapper to catch any exceptions."""
+    def _generate_prediction_safe(self, instance: dict) -> dict:
+        """Wrapper to catch exceptions."""
         try:
-            return self._evaluate_instance(instance)
+            return self._generate_prediction(instance)
         except Exception as e:
             return {
-                "instance_id": instance.get("instance_id", "unknown"),
-                "resolved": False,
+                "org": instance.get("org", "unknown"),
+                "repo": instance.get("repo", "unknown"),
+                "number": instance.get("number", 0),
+                "fix_patch": "",
                 "error": str(e)[:200],
             }
 
     def run(self, max_instances: int | None = None) -> dict[str, Any]:
-        """Run evaluation on all instances."""
+        """Generate predictions for all instances."""
         if not self.instances:
             self.load_instances()
 
-        instances = self.instances[:max_instances] if max_instances else self.instances
+        instances = (
+            self.instances[:max_instances] if max_instances else self.instances
+        )
         total = len(instances)
 
-        console.print(f"\n[bold]Running SWE-bench TypeScript evaluation[/bold]")
+        console.print("\n[bold]Generating SWE-bench TypeScript predictions[/bold]")
         console.print(f"  Model: {self.config.model_name}")
         console.print(f"  Instances: {total}")
-        console.print(f"  Max turns per instance: {self.config.max_turns}")
+        console.print(f"  Max turns: {self.config.max_turns}")
         console.print(f"  Workers: {self.config.max_workers}")
         console.print()
 
-        self.results = []
-        resolved_count = 0
+        self.predictions = []
         submitted_count = 0
+        patch_count = 0
 
         with Progress(
             SpinnerColumn(),
@@ -500,88 +469,105 @@ class SWEBenchTSEvaluator:
             TimeRemainingColumn(),
             console=console,
         ) as progress:
-            task = progress.add_task("Evaluating", total=total)
+            task = progress.add_task("Generating", total=total)
 
             with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
                 futures = {
-                    executor.submit(self._evaluate_instance_safe, inst): inst
+                    executor.submit(self._generate_prediction_safe, inst): inst
                     for inst in instances
                 }
 
                 for future in as_completed(futures):
-                    result = future.result()
-                    self.results.append(result)
+                    pred = future.result()
+                    self.predictions.append(pred)
 
-                    if result.get("resolved"):
-                        resolved_count += 1
-                    if result.get("submitted"):
+                    if pred.get("submitted"):
                         submitted_count += 1
+                    if pred.get("fix_patch"):
+                        patch_count += 1
 
                     progress.advance(task)
                     progress.update(
                         task,
-                        description=f"Evaluating ({resolved_count}/{len(self.results)} resolved)"
+                        description=f"Generating ({patch_count}/{len(self.predictions)} patches)",
                     )
-
-        # Compute summary
-        valid_patches = sum(1 for r in self.results if r.get("patch_valid"))
-        files_match = sum(1 for r in self.results if r.get("files_match"))
-        avg_iterations = sum(r.get("iterations", 0) for r in self.results) / len(self.results) if self.results else 0
 
         summary = {
             "total": total,
-            "resolved": resolved_count,
-            "resolve_rate": resolved_count / total if total > 0 else 0,
             "submitted": submitted_count,
-            "submit_rate": submitted_count / total if total > 0 else 0,
-            "valid_patches": valid_patches,
-            "valid_patch_rate": valid_patches / total if total > 0 else 0,
-            "files_match": files_match,
-            "files_match_rate": files_match / total if total > 0 else 0,
-            "avg_iterations": avg_iterations,
-            "errors": sum(1 for r in self.results if r.get("error")),
+            "patches_generated": patch_count,
+            "errors": sum(1 for p in self.predictions if p.get("error")),
         }
 
         return summary
 
-    def save_results(self) -> Path:
-        """Save results to output directory."""
+    def save_predictions(self) -> Path:
+        """Save predictions in Multi-SWE-bench format."""
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save detailed results
+        # Save in JSONL format for the harness
+        predictions_file = self.config.output_dir / "predictions.jsonl"
+        with open(predictions_file, "w") as f:
+            for pred in self.predictions:
+                # Only include required fields for harness
+                harness_pred = {
+                    "org": pred["org"],
+                    "repo": pred["repo"],
+                    "number": pred["number"],
+                    "fix_patch": pred.get("fix_patch", ""),
+                }
+                f.write(json.dumps(harness_pred) + "\n")
+
+        # Also save full results with trajectories
         results_file = self.config.output_dir / "results.json"
         with open(results_file, "w") as f:
-            json.dump({
-                "config": {
-                    "model_name": self.config.model_name,
-                    "max_turns": self.config.max_turns,
-                    "max_workers": self.config.max_workers,
+            json.dump(
+                {
+                    "config": {
+                        "model_name": self.config.model_name,
+                        "max_turns": self.config.max_turns,
+                        "max_workers": self.config.max_workers,
+                    },
+                    "summary": {
+                        "total": len(self.predictions),
+                        "submitted": sum(
+                            1 for p in self.predictions if p.get("submitted")
+                        ),
+                        "patches": sum(
+                            1 for p in self.predictions if p.get("fix_patch")
+                        ),
+                        "errors": sum(
+                            1 for p in self.predictions if p.get("error")
+                        ),
+                    },
+                    "predictions": self.predictions,
                 },
-                "summary": {
-                    "total": len(self.results),
-                    "resolved": sum(1 for r in self.results if r.get("resolved")),
-                    "resolve_rate": sum(1 for r in self.results if r.get("resolved")) / len(self.results) if self.results else 0,
-                },
-                "results": self.results,
-            }, f, indent=2)
+                f,
+                indent=2,
+            )
 
-        logger.info(f"Results saved to {results_file}")
-        return results_file
+        logger.info(f"Predictions saved to {predictions_file}")
+        logger.info(f"Full results saved to {results_file}")
+        return predictions_file
 
 
 def main():
     """CLI entry point."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Run SWE-bench TypeScript evaluation")
+    parser = argparse.ArgumentParser(
+        description="Generate SWE-bench TypeScript predictions"
+    )
     parser.add_argument("--model-name", type=str, default="gpt-oss")
     parser.add_argument("--base-url", type=str, default="http://localhost:8000/v1")
-    parser.add_argument("--max-turns", type=int, default=30, help="Max agent turns")
+    parser.add_argument("--max-turns", type=int, default=30)
     parser.add_argument("--max-workers", type=int, default=8)
     parser.add_argument("--max-instances", type=int, default=None)
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--output-dir", type=Path, default=None)
-    parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed output")
+    parser.add_argument("--cache-dir", type=Path, default=None,
+                        help="Directory to cache git repos (default: data/swe-bench/repo-cache)")
+    parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
     config = SWEBenchConfig(
@@ -591,39 +577,30 @@ def main():
         max_workers=args.max_workers,
         timeout=args.timeout,
         output_dir=args.output_dir or get_output_dir() / "swe-bench-ts",
+        repo_cache_dir=args.cache_dir or Path("data/swe-bench/repo-cache"),
     )
 
-    evaluator = SWEBenchTSEvaluator(config)
-    evaluator.load_instances()
+    predictor = SWEBenchTSPredictor(config)
+    predictor.load_instances()
 
-    summary = evaluator.run(max_instances=args.max_instances)
+    summary = predictor.run(max_instances=args.max_instances)
 
     console.print("\n" + "=" * 60)
-    console.print("[bold]SWE-bench TypeScript Results[/bold]")
+    console.print("[bold]SWE-bench TypeScript Prediction Results[/bold]")
     console.print("=" * 60)
-    console.print(f"  Total instances:    {summary['total']}")
-    console.print(f"  Submitted:          {summary['submitted']} ({summary['submit_rate']:.1%})")
-    console.print(f"  Valid patches:      {summary['valid_patches']} ({summary['valid_patch_rate']:.1%})")
-    console.print(f"  Correct files:      {summary['files_match']} ({summary['files_match_rate']:.1%})")
-    console.print(f"  [bold green]Resolved:           {summary['resolved']} ({summary['resolve_rate']:.1%})[/bold green]")
-    console.print(f"  Avg iterations:     {summary['avg_iterations']:.1f}")
-    console.print(f"  Errors:             {summary['errors']}")
+    console.print(f"  Total instances:     {summary['total']}")
+    console.print(f"  Submitted:           {summary['submitted']}")
+    console.print(f"  Patches generated:   {summary['patches_generated']}")
+    console.print(f"  Errors:              {summary['errors']}")
     console.print("=" * 60)
 
-    if args.verbose and evaluator.results:
-        console.print("\n[bold]Sample Trajectories:[/bold]")
-        for r in evaluator.results[:3]:
-            console.print(f"\n  {r['instance_id']}:")
-            console.print(f"    Resolved: {r.get('resolved', False)}")
-            console.print(f"    Iterations: {r.get('iterations', 0)}")
-            if r.get("error"):
-                console.print(f"    Error: {r['error'][:100]}")
-            if r.get("trajectory"):
-                for t in r["trajectory"][:3]:
-                    if t.get("command"):
-                        console.print(f"    [{t['iteration']}] {t['command'][:60]}...")
+    predictions_file = predictor.save_predictions()
 
-    evaluator.save_results()
+    console.print(f"\n[bold green]Predictions saved to:[/bold green] {predictions_file}")
+    console.print("\nTo evaluate with official harness:")
+    console.print(
+        f"  python -m multi_swe_bench.harness.run_evaluation --config eval_config.json"
+    )
 
 
 if __name__ == "__main__":

@@ -1,32 +1,19 @@
 """
-Training with HuggingFace Transformers + PEFT (QLoRA).
+Training with Unsloth for QLoRA fine-tuning.
+
+Uses Unsloth's FastLanguageModel for efficient training of gpt-oss and similar models.
 """
 
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
-import torch
-from datasets import Dataset, load_dataset
-from peft import (
-    LoraConfig,
-    TaskType,
-    get_peft_model,
-    prepare_model_for_kbit_training,
-)
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BitsAndBytesConfig,
-    TrainingArguments,
-    Trainer,
-    DataCollatorForLanguageModeling,
-)
+from datasets import Dataset
+from transformers import Trainer, TrainingArguments, DataCollatorForLanguageModeling
 
 from ...common.logging import get_logger
-from ...common.paths import get_checkpoint_dir, get_hf_token
+from ...common.paths import get_hf_token
 
 logger = get_logger(__name__)
 
@@ -42,21 +29,18 @@ class DAPTConfig:
     # LoRA
     lora_r: int = 64
     lora_alpha: int = 16
-    lora_dropout: float = 0.05
+    lora_dropout: float = 0.0  # Unsloth recommends 0 dropout
     lora_target_modules: list[str] = field(
         default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     )
 
     # Quantization
     use_4bit: bool = True
-    bnb_4bit_compute_dtype: str = "bfloat16"
-    bnb_4bit_quant_type: str = "nf4"
-    use_double_quant: bool = True
 
     # Training
     batch_size: int = 1
     gradient_accumulation_steps: int = 8
-    learning_rate: float = 2e-5
+    learning_rate: float = 2e-4  # Higher LR works with Unsloth
     num_epochs: int = 3
     max_steps: int = -1
     warmup_ratio: float = 0.03
@@ -79,9 +63,9 @@ class DAPTConfig:
 
 class DAPTTrainer:
     """
-    Domain-Adaptive Pre-Training trainer using QLoRA.
+    Domain-Adaptive Pre-Training trainer using Unsloth QLoRA.
 
-    Enables fine-tuning of large models on a single GPU.
+    Enables efficient fine-tuning of large models on a single GPU.
     """
 
     def __init__(
@@ -90,12 +74,13 @@ class DAPTTrainer:
         output_dir: Path,
         lora_r: int = 64,
         lora_alpha: int = 16,
-        lora_dropout: float = 0.05,
+        lora_dropout: float = 0.0,
         batch_size: int = 1,
         gradient_accumulation_steps: int = 8,
-        learning_rate: float = 2e-5,
+        learning_rate: float = 2e-4,
         num_epochs: int = 3,
         max_steps: Optional[int] = None,
+        max_seq_length: int = 4096,
         use_wandb: bool = False,
         resume_from: Optional[Path] = None,
     ):
@@ -114,6 +99,7 @@ class DAPTTrainer:
             learning_rate=learning_rate,
             num_epochs=num_epochs,
             max_steps=max_steps or -1,
+            max_seq_length=max_seq_length,
         )
 
         self.use_wandb = use_wandb
@@ -124,66 +110,37 @@ class DAPTTrainer:
         self.tokenizer = None
         self.trainer = None
 
-    def _setup_quantization(self) -> BitsAndBytesConfig:
-        """Configure 4-bit quantization."""
-        compute_dtype = getattr(torch, self.config.bnb_4bit_compute_dtype)
-
-        return BitsAndBytesConfig(
-            load_in_4bit=self.config.use_4bit,
-            bnb_4bit_quant_type=self.config.bnb_4bit_quant_type,
-            bnb_4bit_compute_dtype=compute_dtype,
-            bnb_4bit_use_double_quant=self.config.use_double_quant,
-        )
-
-    def _setup_lora(self) -> LoraConfig:
-        """Configure LoRA adapter."""
-        return LoraConfig(
-            r=self.config.lora_r,
-            lora_alpha=self.config.lora_alpha,
-            lora_dropout=self.config.lora_dropout,
-            target_modules=self.config.lora_target_modules,
-            bias="none",
-            task_type=TaskType.CAUSAL_LM,
-        )
-
     def _load_model(self) -> None:
-        """Load and prepare model for training."""
-        logger.info(f"Loading model: {self.model_id}")
+        """Load and prepare model for training using Unsloth."""
+        from unsloth import FastLanguageModel
 
-        # Load tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model_id,
-            trust_remote_code=self.config.trust_remote_code,
+        logger.info(f"Loading model with Unsloth: {self.model_id}")
+
+        # Load model and tokenizer with Unsloth
+        self.model, self.tokenizer = FastLanguageModel.from_pretrained(
+            model_name=self.model_id,
+            max_seq_length=self.config.max_seq_length,
+            load_in_4bit=self.config.use_4bit,
+            dtype=None,  # Auto-detect
             token=get_hf_token(),
         )
 
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Load model with quantization
-        bnb_config = self._setup_quantization()
-
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_id,
-            quantization_config=bnb_config,
-            device_map="auto",
-            trust_remote_code=self.config.trust_remote_code,
-            token=get_hf_token(),
-            torch_dtype=torch.bfloat16,
-        )
-
-        # Prepare for k-bit training
-        self.model = prepare_model_for_kbit_training(
+        # Add LoRA adapters using Unsloth
+        self.model = FastLanguageModel.get_peft_model(
             self.model,
-            use_gradient_checkpointing=self.config.gradient_checkpointing,
+            r=self.config.lora_r,
+            lora_alpha=self.config.lora_alpha,
+            lora_dropout=self.config.lora_dropout,
+            target_modules=self.config.lora_target_modules,
+            bias="none",
+            use_gradient_checkpointing="unsloth",  # Unsloth optimized
+            random_state=42,
         )
 
-        # Add LoRA adapter
-        lora_config = self._setup_lora()
-        self.model = get_peft_model(self.model, lora_config)
-
-        # Print trainable parameters
-        self.model.print_trainable_parameters()
+        logger.info("Model loaded with LoRA adapters")
 
     def _load_dataset(self, data_path: Path) -> Dataset:
         """Load training dataset from JSONL."""
@@ -198,23 +155,7 @@ class DAPTTrainer:
         dataset = Dataset.from_list(data)
         logger.info(f"Loaded {len(dataset)} examples")
 
-        # Tokenize
-        def tokenize(examples):
-            return self.tokenizer(
-                examples["text"],
-                truncation=True,
-                max_length=self.config.max_seq_length,
-                padding=False,
-            )
-
-        tokenized = dataset.map(
-            tokenize,
-            batched=True,
-            remove_columns=dataset.column_names,
-            desc="Tokenizing",
-        )
-
-        return tokenized
+        return dataset
 
     def train(self, data_path: Path) -> None:
         """
@@ -230,10 +171,20 @@ class DAPTTrainer:
         # Load dataset
         train_dataset = self._load_dataset(data_path)
 
-        # Data collator
-        data_collator = DataCollatorForLanguageModeling(
-            tokenizer=self.tokenizer,
-            mlm=False,
+        # Tokenize the dataset
+        def tokenize_function(examples):
+            return self.tokenizer(
+                examples["text"],
+                truncation=True,
+                max_length=self.config.max_seq_length,
+                padding=False,
+            )
+
+        tokenized_dataset = train_dataset.map(
+            tokenize_function,
+            batched=True,
+            remove_columns=train_dataset.column_names,
+            desc="Tokenizing",
         )
 
         # Training arguments
@@ -252,19 +203,24 @@ class DAPTTrainer:
             save_total_limit=self.config.save_total_limit,
             bf16=self.config.bf16,
             tf32=self.config.tf32,
-            gradient_checkpointing=self.config.gradient_checkpointing,
-            optim="paged_adamw_32bit",
+            optim="adamw_8bit",
             report_to="wandb" if self.use_wandb else "none",
             run_name=f"dapt-{self.model_id.split('/')[-1]}",
-            remove_unused_columns=True,
             dataloader_num_workers=4,
+            seed=42,
+        )
+
+        # Data collator for causal LM
+        data_collator = DataCollatorForLanguageModeling(
+            tokenizer=self.tokenizer,
+            mlm=False,
         )
 
         # Create trainer
         self.trainer = Trainer(
             model=self.model,
             args=training_args,
-            train_dataset=train_dataset,
+            train_dataset=tokenized_dataset,
             data_collator=data_collator,
         )
 

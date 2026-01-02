@@ -2,6 +2,7 @@
 # Used by: scripts/run_dapt_train.py
 
 # Base model (Unsloth's gpt-oss-20b for QLoRA)
+# Unsloth handles quantization internally - use the base model
 model_id: "unsloth/gpt-oss-20b"
 
 # Training data

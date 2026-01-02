@@ -20,21 +20,19 @@ This project provides a complete pipeline for:
 
 ## Evaluation Layers
 
-### A) Benchmark Evaluation
+### A) Code Benchmark Evaluation
 
-Uses standard code benchmarks:
-- **HumanEval** - Python function completion
-- **MBPP** - Python programming problems
-- **HumanEval-TS** - TypeScript function completion (when available)
-- **MultiPL-E TypeScript** - Multi-language benchmark
+TypeScript code generation benchmarks (via MultiPL-E):
+- **HumanEval-TS** - TypeScript function completion
+- **MBPP-TS** - TypeScript programming problems
 
-### B) Repo-Based Patch Tasks
+### B) SWE-bench TypeScript
 
-Real-world agent evaluation:
-- Clone actual TypeScript repositories
-- Apply model-generated patches
-- Validate via compile, test, and lint checks
-- Measure practical agent effectiveness
+Real-world agent evaluation using Multi-SWE-bench TypeScript repositories:
+- Clone actual TypeScript repositories (DarkReader, Material-UI, Vue.js)
+- Agent-based bug fixing with tool use (bash, file editing)
+- Validate patches against gold solutions
+- Measure practical agent effectiveness on real issues
 
 ## Training Flows
 

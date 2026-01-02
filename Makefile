@@ -1,7 +1,7 @@
 .PHONY: help install install-dev install-vllm install-all setup system-info \
         lint format typecheck test test-cov clean \
-        serve-vllm eval train-dapt train-sft \
-        collect-repos build-corpus \
+        serve-vllm eval eval-code eval-swe-bench eval-swe-bench-predict eval-swe-bench-harness \
+        train-dapt train-sft collect-repos build-corpus \
         docker-build docker-build-train docker-build-eval docker-build-vllm \
         docker-up docker-down
 
@@ -35,7 +35,8 @@ help:
 	@echo ""
 	@echo "Inference & Evaluation:"
 	@echo "  make serve-vllm     Start vLLM server"
-	@echo "  make eval           Run HumanEval/MBPP TypeScript evaluation"
+	@echo "  make eval           Run all evaluations (HumanEval/MBPP + SWE-bench)"
+	@echo "  make eval-code      Run HumanEval/MBPP TypeScript evaluation only"
 	@echo "  make eval-swe-bench Run SWE-bench TypeScript evaluation"
 	@echo ""
 	@echo "Docker:"
@@ -136,7 +137,10 @@ train-sft:
 serve-vllm:
 	@bash scripts/serve_vllm.sh --model $(MODEL_ID)
 
-eval:
+eval: eval-code eval-swe-bench
+	@echo "All evaluations complete."
+
+eval-code:
 	@bash scripts/run_nemo_eval.sh
 
 eval-swe-bench:
@@ -147,6 +151,8 @@ eval-swe-bench:
 		--max-workers $(or $(MAX_WORKERS),16) \
 		$(if $(MAX_INSTANCES),--max-instances $(MAX_INSTANCES),) \
 		$(if $(VERBOSE),--verbose,)
+	@echo "Running official Multi-SWE-bench evaluation harness..."
+	@bash scripts/run_swe_bench_eval.sh --max-workers $(or $(MAX_WORKERS),8)
 
 # Docker targets
 DOCKER_COMPOSE = docker compose -f docker/docker-compose.yml
