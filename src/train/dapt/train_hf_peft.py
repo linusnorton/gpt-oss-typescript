@@ -4,6 +4,11 @@ Training with Unsloth for QLoRA fine-tuning.
 Uses Unsloth's FastLanguageModel for efficient training of gpt-oss and similar models.
 """
 
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"  # Avoid fork warning
+
+import unsloth  # Must be first to patch transformers/peft
+
 import json
 from dataclasses import dataclass, field
 from pathlib import Path

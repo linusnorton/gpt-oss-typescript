@@ -26,7 +26,7 @@ lora:
 # Training hyperparameters (optimized for Unsloth)
 training:
   batch_size: 2                      # Per-device batch size (can be larger with Unsloth)
-  gradient_accumulation_steps: 4     # Effective batch = 8
+  gradient_accumulation_steps: 8     # Effective batch = 8
   learning_rate: 2.0e-4              # Higher LR works with Unsloth
   num_epochs: 3                      # Training epochs
   max_steps: -1                      # -1 to use epochs instead

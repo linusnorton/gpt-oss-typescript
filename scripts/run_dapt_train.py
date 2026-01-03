@@ -140,6 +140,7 @@ def main() -> int:
 
     # Load base config
     config = load_config(args.config)
+    training_config = config.get("training", {})
 
     # Override config with CLI args
     model_id = args.model_id or config.get("model_id") or os.getenv(
@@ -155,40 +156,41 @@ def main() -> int:
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Training hyperparameters
+    # Training hyperparameters (from CLI, then config.training, then env)
     batch_size = (
         args.batch_size
-        or config.get("batch_size")
+        or training_config.get("batch_size")
         or int(os.getenv("TRAIN_BATCH_SIZE", "1"))
     )
     gradient_accumulation_steps = (
         args.gradient_accumulation_steps
-        or config.get("gradient_accumulation_steps")
+        or training_config.get("gradient_accumulation_steps")
         or int(os.getenv("TRAIN_GRADIENT_ACCUMULATION_STEPS", "8"))
     )
     learning_rate = (
         args.learning_rate
-        or config.get("learning_rate")
-        or float(os.getenv("TRAIN_LEARNING_RATE", "2e-5"))
+        or training_config.get("learning_rate")
+        or float(os.getenv("TRAIN_LEARNING_RATE", "2e-4"))
     )
     num_epochs = (
         args.num_epochs
-        or config.get("num_epochs")
+        or training_config.get("num_epochs")
         or int(os.getenv("TRAIN_NUM_EPOCHS", "3"))
     )
 
-    # LoRA config
+    # LoRA config (nested under 'lora' in YAML)
+    lora_config = config.get("lora", {})
     lora_r = (
         args.lora_r
-        or config.get("lora_r")
+        or lora_config.get("r")
         or int(os.getenv("QLORA_R", "64"))
     )
     lora_alpha = (
         args.lora_alpha
-        or config.get("lora_alpha")
+        or lora_config.get("alpha")
         or int(os.getenv("QLORA_ALPHA", "16"))
     )
-    lora_dropout = config.get("lora_dropout") or float(os.getenv("QLORA_DROPOUT", "0.05"))
+    lora_dropout = lora_config.get("dropout", float(os.getenv("QLORA_DROPOUT", "0.0")))
 
     logger.info(f"Model: {model_id}")
     logger.info(f"Training data: {train_data}")
