@@ -33,6 +33,7 @@ DEFAULT_SERVED_NAME="${VLLM_SERVED_NAME:-gpt-oss}"
 # Parse arguments
 MODEL=""
 LORA_PATH=""
+MAX_LORA_RANK=""
 DTYPE="$DEFAULT_DTYPE"
 GPU_MEMORY_UTIL="$DEFAULT_GPU_MEMORY_UTIL"
 MAX_MODEL_LEN="$DEFAULT_MAX_MODEL_LEN"
@@ -57,6 +58,7 @@ print_usage() {
     echo "Options:"
     echo "  --model PATH          Model ID or local path (default: $DEFAULT_MODEL)"
     echo "  --lora PATH           Path to LoRA adapter (optional)"
+    echo "  --max-lora-rank N     Maximum LoRA rank (default: auto-detect from adapter)"
     echo "  --dtype TYPE          Data type: auto, bfloat16, float16 (default: $DEFAULT_DTYPE)"
     echo "  --gpu-memory-util N   GPU memory utilization 0-1 (default: $DEFAULT_GPU_MEMORY_UTIL)"
     echo "  --max-model-len N     Maximum sequence length (default: $DEFAULT_MAX_MODEL_LEN)"
@@ -94,6 +96,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --lora)
             LORA_PATH="$2"
+            shift 2
+            ;;
+        --max-lora-rank)
+            MAX_LORA_RANK="$2"
             shift 2
             ;;
         --dtype)
@@ -277,6 +283,21 @@ if [ -n "$LORA_PATH" ]; then
     fi
     VLLM_CMD+=" --enable-lora"
     VLLM_CMD+=" --lora-modules gptoss-lora=$LORA_PATH"
+
+    # Auto-detect LoRA rank from adapter config if not specified
+    if [ -z "$MAX_LORA_RANK" ]; then
+        ADAPTER_CONFIG="$LORA_PATH/adapter_config.json"
+        if [ -f "$ADAPTER_CONFIG" ]; then
+            MAX_LORA_RANK=$(python -c "import json; print(json.load(open('$ADAPTER_CONFIG'))['r'])" 2>/dev/null || echo "")
+            if [ -n "$MAX_LORA_RANK" ]; then
+                echo -e "${GREEN}  Auto-detected LoRA rank: $MAX_LORA_RANK${NC}"
+            fi
+        fi
+    fi
+
+    if [ -n "$MAX_LORA_RANK" ]; then
+        VLLM_CMD+=" --max-lora-rank $MAX_LORA_RANK"
+    fi
 fi
 
 if [ -n "$QUANTIZATION" ]; then

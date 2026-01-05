@@ -136,9 +136,12 @@ if [ -f "$REPORT_FILE" ]; then
 import json
 with open('${REPORT_FILE}') as f:
     report = json.load(f)
-resolved = len(report.get('resolved_instances', []))
-unresolved = len(report.get('unresolved_instances', []))
-total = resolved + unresolved
+# Handle both old format (list) and new format (int)
+resolved_val = report.get('resolved_instances', 0)
+unresolved_val = report.get('unresolved_instances', 0)
+resolved = len(resolved_val) if isinstance(resolved_val, list) else resolved_val
+unresolved = len(unresolved_val) if isinstance(unresolved_val, list) else unresolved_val
+total = report.get('total_instances', resolved + unresolved)
 rate = (resolved / total * 100) if total > 0 else 0
 print(f'  Resolved:   {resolved}/{total} ({rate:.1f}%)')
 print(f'  Unresolved: {unresolved}/{total}')

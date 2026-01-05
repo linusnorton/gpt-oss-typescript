@@ -3,9 +3,12 @@ SWE-bench TypeScript Evaluator.
 
 Generates predictions for Multi-SWE-bench TypeScript instances using an agentic loop.
 Uses the official Multi-SWE-bench harness for evaluation.
+
+Uses the GPT-OSS Responses API (harmony format) for proper tool calling.
 """
 
 import json
+import re
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -33,30 +36,58 @@ logger = get_logger(__name__)
 
 
 # =============================================================================
-# Agent Instructions
+# Tool Definitions for GPT-OSS Responses API
 # =============================================================================
 
-AGENT_INSTRUCTIONS = """You are an expert software engineer fixing a bug in a TypeScript repository.
+AGENT_TOOLS = [
+    {
+        "type": "function",
+        "name": "bash",
+        "description": "Execute a bash command in the repository. Use this for file exploration (find, grep, cat), editing (sed -i), and verification (git diff).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The bash command to execute"
+                }
+            },
+            "required": ["command"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "submit",
+        "description": "Submit the solution when you have finished fixing the bug. Call this after verifying your changes with git diff.",
+        "parameters": {
+            "type": "object",
+            "properties": {}
+        }
+    }
+]
 
-AVAILABLE TOOLS:
-- bash(command): Run shell commands (grep, find, cat, sed, git, etc.)
-- submit(): Call when you have finished fixing the bug
+SYSTEM_PROMPT = """You are an expert software engineer fixing a bug in a TypeScript repository.
 
-NOTE: There is NO apply_patch tool. Use sed -i or echo/cat with redirection to edit files.
+IMPORTANT: You can ONLY use these tools:
+- bash: Execute shell commands (grep, find, cat, sed, git, etc.)
+- submit: Call when done fixing the bug
+
+To edit files, use sed -i. For example:
+  sed -i 's/oldPattern/newPattern/g' path/to/file.ts
+
+Do NOT try to use apply_patch - it does not exist. Use sed -i instead.
 
 Workflow:
-1. Use grep/find to locate the relevant code files
-2. Use cat or sed -n to view the buggy code
-3. Use sed -i 's/old/new/' to make the fix (in-place edit)
-4. Use git diff to verify your changes are correct
-5. Call submit() when done
-
-Example edit: sed -i 's/buggyCode/fixedCode/g' src/file.ts
+1. Use grep/find to locate relevant files
+2. Use cat/sed -n to view code
+3. Use sed -i to make the fix
+4. Use git diff to verify changes
+5. Call submit when done
 
 Rules:
 - Make minimal, focused changes
 - Do NOT modify test files
-- Always verify changes with git diff before submitting"""
+- Always verify with git diff before submitting"""
 
 
 # =============================================================================
@@ -122,10 +153,17 @@ class SWEBenchTSPredictor:
                 self._repo_locks[repo_key] = threading.Lock()
 
         with self._repo_locks[repo_key]:
-            if cache_dir.exists() and (cache_dir / ".git").exists():
-                # Already cached, just fetch latest
+            # Check for bare repo (has HEAD file, not .git directory)
+            if cache_dir.exists() and (cache_dir / "HEAD").exists():
+                # Already cached as bare repo
                 logger.debug(f"Repo {repo_key} already cached")
                 return cache_dir
+
+            # Clean up incomplete clone if directory exists but isn't a valid bare repo
+            if cache_dir.exists():
+                import shutil
+                logger.warning(f"Cleaning up incomplete cache for {repo_key}")
+                shutil.rmtree(cache_dir)
 
             # Clone with full history to cache
             logger.info(f"Caching repo {repo_key}...")
@@ -187,14 +225,14 @@ class SWEBenchTSPredictor:
         self, instance: dict, repo_dir: Path
     ) -> tuple[bool, str, list[dict]]:
         """
-        Run the agent to generate a fix.
+        Run the agent to generate a fix using GPT-OSS Responses API.
 
         Returns:
             (submitted, patch, trajectory)
         """
         submitted = {"value": False}
 
-        def bash(command: str) -> str:
+        def execute_bash(command: str) -> str:
             """Execute a bash command."""
             if not command.strip():
                 return "Error: Empty command"
@@ -222,112 +260,116 @@ class SWEBenchTSPredictor:
             except Exception as e:
                 return f"Error: {str(e)[:200]}"
 
-        def submit() -> str:
-            """Mark the solution as complete."""
-            submitted["value"] = True
-            return "Solution submitted successfully."
-
-        tools = {"bash": bash, "submit": submit}
-        tool_defs = [
-            {
-                "type": "function",
-                "name": "bash",
-                "description": "Execute a bash command in the repository.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "The bash command to execute",
-                        }
-                    },
-                    "required": ["command"],
-                },
-            },
-            {
-                "type": "function",
-                "name": "submit",
-                "description": "Call when you have finished fixing the bug.",
-                "parameters": {"type": "object", "properties": {}, "required": []},
-            },
-        ]
-
         # Create OpenAI client pointing to vLLM
         client = OpenAI(
             base_url=self.config.base_url,
             api_key=self.config.api_key,
         )
 
-        # Build conversation
-        conversation = AGENT_INSTRUCTIONS + "\n\n" + self._build_prompt(instance)
+        # Build the initial prompt
+        user_prompt = f"{SYSTEM_PROMPT}\n\n{self._build_prompt(instance)}"
+
+        # Conversation items for multi-turn
+        conversation: list = [
+            {"type": "message", "role": "user", "content": user_prompt}
+        ]
         trajectory = []
 
         for turn in range(self.config.max_turns):
             try:
+                # Call the Responses API (GPT-OSS harmony format)
                 response = client.responses.create(
                     model=self.config.model_name,
                     input=conversation,
-                    tools=tool_defs,
+                    tools=AGENT_TOOLS,
+                    temperature=1.0,
+                    top_p=1.0,
+                    max_output_tokens=1024,
                 )
 
-                # Extract tool calls
-                tool_calls = []
-                text_output = ""
+                # Process response output items
+                function_call_item = None
+                reasoning_text = ""
+                message_text = ""
 
                 for item in response.output:
-                    item_type = getattr(item, "type", None)
+                    if item.type == "reasoning":
+                        # Extract reasoning text for trajectory
+                        if hasattr(item, 'content') and item.content:
+                            for c in item.content:
+                                if hasattr(c, 'text'):
+                                    reasoning_text = c.text[:200]
+                    elif item.type in ("function_call", "mcp_call"):
+                        # Handle both function_call and mcp_call (vLLM returns both)
+                        function_call_item = item
+                    elif item.type == "message":
+                        # Final message (no more tool calls)
+                        if hasattr(item, 'content') and item.content:
+                            for c in item.content:
+                                if hasattr(c, 'text'):
+                                    message_text = c.text[:200]
 
-                    if item_type == "function_call":
-                        tool_calls.append(
-                            {
-                                "name": item.name,
-                                "arguments": item.arguments,
-                            }
-                        )
-                    elif item_type == "message":
-                        content = getattr(item, "content", "")
-                        if isinstance(content, list):
-                            text_output = "".join(
-                                getattr(p, "text", str(p))
-                                if hasattr(p, "text")
-                                else str(p)
-                                for p in content
-                            )
-                        elif hasattr(content, "text"):
-                            text_output = content.text
-                        else:
-                            text_output = str(content) if content else ""
+                # Log trajectory
+                trajectory.append({
+                    "turn": turn + 1,
+                    "reasoning": reasoning_text,
+                    "tool_calls": [{
+                        "name": function_call_item.name,
+                        "args": function_call_item.arguments[:100]
+                    }] if function_call_item else [],
+                    "message": message_text,
+                })
 
-                trajectory.append(
-                    {
-                        "turn": turn + 1,
-                        "tool_calls": [
-                            {"name": tc["name"], "args": tc["arguments"][:100]}
-                            for tc in tool_calls
-                        ],
-                        "text": text_output[:200] if text_output else "",
-                    }
-                )
-
-                if not tool_calls:
+                # If no function call, the model is done
+                if not function_call_item:
+                    logger.debug(f"Turn {turn + 1}: No function call, stopping")
                     break
 
-                # Execute tools
-                for tc in tool_calls:
-                    try:
-                        args = json.loads(tc["arguments"])
-                    except json.JSONDecodeError:
-                        args = {}
+                # Clean up tool name (model sometimes adds harmony tokens like <|channel|>)
+                tool_name = function_call_item.name.split("<|")[0].strip()
 
-                    if tc["name"] == "bash":
-                        result = bash(args.get("command", ""))
-                    elif tc["name"] == "submit":
-                        result = submit()
+                # Parse arguments with error handling
+                try:
+                    tool_args = json.loads(function_call_item.arguments)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Turn {turn + 1}: Invalid JSON in tool args: {e}")
+                    # Try to extract command from malformed JSON
+                    cmd_match = re.search(r'"command"\s*:\s*"([^"]*)"', function_call_item.arguments)
+                    if cmd_match:
+                        tool_args = {"command": cmd_match.group(1)}
                     else:
-                        result = f"Unknown tool: {tc['name']}"
+                        tool_args = {}
 
-                    conversation += f"\n\n[Tool: {tc['name']}({tc['arguments']})]\n"
-                    conversation += f"[Result: {result[:2000]}]\n"
+                # Execute the tool
+                if tool_name == "bash":
+                    result = execute_bash(tool_args.get("command", ""))
+                elif tool_name == "submit":
+                    submitted["value"] = True
+                    result = "Solution submitted successfully."
+                else:
+                    result = f"Unknown tool: {tool_name}"
+
+                logger.debug(f"Turn {turn + 1}: {tool_name}() -> {result[:100]}...")
+
+                # Get call_id from different possible attributes
+                call_id = getattr(function_call_item, 'call_id', None) or \
+                          getattr(function_call_item, 'id', None) or \
+                          f"call_{turn}"
+                item_id = getattr(function_call_item, 'id', call_id)
+
+                # Add function call and result to conversation for next turn
+                conversation.append({
+                    "type": "function_call",
+                    "id": item_id,
+                    "call_id": call_id,
+                    "name": tool_name,  # Use cleaned tool name
+                    "arguments": function_call_item.arguments,
+                })
+                conversation.append({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": result,
+                })
 
                 if submitted["value"]:
                     break
